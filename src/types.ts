@@ -207,40 +207,45 @@ export interface SportsScienceFields {
   requirement_note: string;
 }
 
+// ---------- 服務時段（一張預約單可以包含多筆服務時段） ----------
+
+export interface ServiceEntry {
+  entry_id: string; // 內部識別碼，同一張預約單內唯一，供編輯/容量檢查排除自己使用
+  service: ServiceCode;
+  headcount: number;
+  start_time: string; // HH:mm
+  end_time: string; // HH:mm，視服務類型決定是否於畫面上要求輸入
+  location?: string; // 部分服務（例如餐食）用得到的簡易地點欄位，其餘服務地點資訊放在對應 details 裡
+  note?: string; // 該服務項目自己的備註（區別於整張預約單共用的備註）
+  meal?: MealFields;
+  transport?: TransportFields;
+  therapy?: TherapyFields;
+  fitness?: FitnessFields;
+  sportsScience?: SportsScienceFields;
+}
+
 // ---------- 預約主體 ----------
 
 export interface BaseReservation {
   id: string; // 內部識別碼（crypto.randomUUID），不對外顯示
-  reservation_no: string; // RYYMMDD-XXX，系統自動產生
+  reservation_no: string; // RYYMMDD-XXX，系統自動產生；同一張預約單內所有服務共用同一個編號
   reservation_date: string; // YYYY-MM-DD
   team: TeamCode;
   team_other_text: string; // team === "other" 時使用
-  service: ServiceCode;
-  headcount: number;
-  start_time: string; // HH:mm，共用欄位；各服務對應方式見下方型別註解
-  end_time: string; // HH:mm，視服務類型決定是否於畫面上要求輸入
   contact_person: string;
   contact_method: string;
-  notes: string;
+  notes: string; // 整張預約單共用備註
   created_at: string; // ISO
   updated_at: string; // ISO
 }
 
 export interface Reservation extends BaseReservation {
-  meal?: MealFields;
-  transport?: TransportFields;
-  therapy?: TherapyFields;
-  fitness?: FitnessFields;
-  sportsScience?: SportsScienceFields;
+  services: ServiceEntry[];
 }
 
 // 新增/編輯表單使用的暫存資料形狀（尚未產生 id/reservation_no/時間戳記）
 export type ReservationDraft = Omit<BaseReservation, "id" | "reservation_no" | "created_at" | "updated_at"> & {
-  meal?: MealFields;
-  transport?: TransportFields;
-  therapy?: TherapyFields;
-  fitness?: FitnessFields;
-  sportsScience?: SportsScienceFields;
+  services: ServiceEntry[];
 };
 
 export function emptyMealFields(): MealFields {
@@ -279,18 +284,119 @@ export function emptySportsScienceFields(): SportsScienceFields {
   return { sports_science_branch: "physio_test", requirement_note: "" };
 }
 
+/** 服務項目是否需要使用者填寫「結束時間」（防護治療／體能訓練／運科支援皆採時段預約，需要結束時間） */
+export function serviceRequiresEndTime(service: ServiceCode): boolean {
+  return service === "therapy" || service === "fitness" || service === "sports_science";
+}
+
+function newEntryId(): string {
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto) return crypto.randomUUID();
+  return `entry-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+/** 建立某個服務項目的空白服務時段（預設欄位值），entry_id 一律重新產生 */
+export function emptyServiceEntry(service: ServiceCode): ServiceEntry {
+  const base = { entry_id: newEntryId(), service, headcount: 1, start_time: "09:00", end_time: "" };
+  if (service === "meal") return { ...base, meal: emptyMealFields() };
+  if (service === "transport") {
+    const t = emptyTransportFields();
+    return { ...base, headcount: t.passenger_count, transport: t };
+  }
+  if (service === "therapy") return { ...base, therapy: emptyTherapyFields() };
+  if (service === "fitness") return { ...base, fitness: emptyFitnessFields() };
+  return { ...base, sportsScience: emptySportsScienceFields() };
+}
+
 export function emptyDraft(defaultDate: string): ReservationDraft {
   return {
     reservation_date: defaultDate,
     team: "athletics",
     team_other_text: "",
-    service: "meal",
-    headcount: 1,
-    start_time: "09:00",
-    end_time: "",
     contact_person: "",
     contact_method: "",
     notes: "",
-    meal: emptyMealFields(),
+    services: [],
   };
+}
+
+// ---------- 舊版（單一服務）資料格式相容 ----------
+// 2026-09 版之前，一張預約單只能有一個服務項目，欄位（service/headcount/start_time/end_time/meal/transport/...）
+// 直接放在預約單最外層。改為「一張預約單可包含多個服務」後，這些欄位收進 services[] 陣列裡。
+// 讀取舊資料（localStorage 或匯入的 JSON 備份）時，一律透過 normalizeReservation() 自動轉換成新格式，
+// 確保舊版已儲存的資料仍能正常顯示、修改及匯出。
+
+interface LegacySingleServiceReservation {
+  id: string;
+  reservation_no: string;
+  reservation_date: string;
+  team: TeamCode;
+  team_other_text: string;
+  service: ServiceCode;
+  headcount: number;
+  start_time: string;
+  end_time: string;
+  contact_person: string;
+  contact_method: string;
+  notes: string;
+  created_at: string;
+  updated_at: string;
+  meal?: MealFields;
+  transport?: TransportFields;
+  therapy?: TherapyFields;
+  fitness?: FitnessFields;
+  sportsScience?: SportsScienceFields;
+}
+
+function isLegacySingleServiceShape(raw: unknown): raw is LegacySingleServiceReservation {
+  if (!raw || typeof raw !== "object") return false;
+  const obj = raw as Record<string, unknown>;
+  return typeof obj.service === "string" && !Array.isArray(obj.services);
+}
+
+/** 確保每個服務時段都有 entry_id（極舊備份或手動編輯過的 JSON 可能缺少） */
+function ensureEntryIds(services: ServiceEntry[]): ServiceEntry[] {
+  return services.map((s) => (s.entry_id ? s : { ...s, entry_id: newEntryId() }));
+}
+
+/** 把任何形狀（新版 / 舊版單一服務）的預約單資料，正規化成目前的多服務資料結構 */
+export function normalizeReservation(raw: unknown): Reservation {
+  if (isLegacySingleServiceShape(raw)) {
+    const {
+      id,
+      reservation_no,
+      reservation_date,
+      team,
+      team_other_text,
+      service,
+      headcount,
+      start_time,
+      end_time,
+      contact_person,
+      contact_method,
+      notes,
+      created_at,
+      updated_at,
+      meal,
+      transport,
+      therapy,
+      fitness,
+      sportsScience,
+    } = raw;
+    const entry: ServiceEntry = { entry_id: newEntryId(), service, headcount, start_time, end_time, meal, transport, therapy, fitness, sportsScience };
+    return {
+      id,
+      reservation_no,
+      reservation_date,
+      team,
+      team_other_text,
+      contact_person,
+      contact_method,
+      notes,
+      created_at,
+      updated_at,
+      services: [entry],
+    };
+  }
+  const obj = raw as Reservation;
+  return { ...obj, services: ensureEntryIds(Array.isArray(obj.services) ? obj.services : []) };
 }

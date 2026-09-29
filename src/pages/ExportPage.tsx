@@ -29,8 +29,8 @@ export default function ExportPage() {
     try {
       const wb = await buildDailyExportWorkbook(date, reservations);
       const blob = await workbookToBlob(wb);
-      triggerBlobDownload(blob, `${date}_亞帕運中繼站預約清單.xlsx`);
-      setMsg(`已匯出 ${date} 的預約清單（共 ${dayCount} 筆預約）。`);
+      triggerBlobDownload(blob, `${date}_亞帕運中繼站預約及派車表.xlsx`);
+      setMsg(`已匯出 ${date} 的預約及派車表（共 ${dayCount} 張預約單）。`);
     } finally {
       setBusy(false);
     }
@@ -42,8 +42,8 @@ export default function ExportPage() {
 
       <section className="bg-white rounded-xl shadow p-4 space-y-3">
         <p className="text-sm text-gray-600">
-          選擇日期後匯出當天的預約清單，內含「每日預約總表」「餐食」「交通接駁」「防護治療」「體能訓練」「運科支援」六張工作表，
-          即使當天某項服務沒有預約，工作表仍會保留並顯示「本日無預約資料」。
+          選擇日期後，把當天全部預約單彙整在同一個 Excel 檔案（不會每筆預約各自產生一個檔案），內含「每日預約總表」「派車需求明細」「每日派車表」「餐食」「防護治療」「體能訓練」「運科支援」七張工作表，
+          即使當天某項服務沒有預約，工作表仍會保留並顯示「本日無預約資料」（「每日派車表」是固定的時間×車輛表格，即使沒有接駁/送餐需求也會保留完整時間列）。
         </p>
         <div className="flex flex-wrap items-end gap-3">
           <div>

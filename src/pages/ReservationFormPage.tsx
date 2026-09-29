@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useData } from "@/context/DataContext";
-import { checkCapacity } from "@/lib/capacity";
+import { CapacityCheckResult, checkCapacity } from "@/lib/capacity";
 import { isDateInEventRange, todayInEventRangeOrStart } from "@/lib/time";
 import { ReservationSummary } from "@/components/ReservationSummary";
 import {
@@ -15,6 +15,8 @@ import {
   ReservationDraft,
   SERVICE_LABELS,
   SERVICE_OPTIONS,
+  ServiceCode,
+  ServiceEntry,
   SPORTS_SCIENCE_BRANCH_LABELS,
   SPORTS_SCIENCE_BRANCH_OPTIONS,
   TEAM_LABELS,
@@ -24,11 +26,8 @@ import {
   TRANSPORT_LOCATION_LABELS,
   TRANSPORT_LOCATION_OPTIONS,
   emptyDraft,
-  emptyFitnessFields,
-  emptyMealFields,
-  emptySportsScienceFields,
-  emptyTherapyFields,
-  emptyTransportFields,
+  emptyServiceEntry,
+  serviceRequiresEndTime,
 } from "@/types";
 
 function reservationToDraft(r: Reservation): ReservationDraft {
@@ -80,28 +79,32 @@ export default function ReservationFormPage() {
     setDraft((prev) => ({ ...prev, ...p }));
   }
 
-  function onServiceChange(service: ReservationDraft["service"]) {
+  function patchEntry(entryId: string, p: Partial<ServiceEntry>) {
+    setDraft((prev) => ({ ...prev, services: prev.services.map((s) => (s.entry_id === entryId ? { ...s, ...p } : s)) }));
+  }
+
+  function toggleService(service: ServiceCode, checked: boolean) {
     setDraft((prev) => {
-      const base: ReservationDraft = { ...prev, service, meal: undefined, transport: undefined, therapy: undefined, fitness: undefined, sportsScience: undefined };
-      if (service === "meal") return { ...base, meal: emptyMealFields(), end_time: "" };
-      if (service === "transport") {
-        const t = emptyTransportFields();
-        return { ...base, transport: t, end_time: "", headcount: t.passenger_count };
+      if (checked) {
+        if (prev.services.some((s) => s.service === service)) return prev;
+        return { ...prev, services: [...prev.services, emptyServiceEntry(service)] };
       }
-      if (service === "therapy") return { ...base, therapy: emptyTherapyFields() };
-      if (service === "fitness") return { ...base, fitness: emptyFitnessFields() };
-      if (service === "sports_science") return { ...base, sportsScience: emptySportsScienceFields() };
-      return base;
+      return { ...prev, services: prev.services.filter((s) => s.service !== service) };
     });
   }
 
   const errors = useMemo(() => validateDraft(draft), [draft]);
-  const mealMismatch = draft.service === "meal" && draft.meal ? draft.meal.meal_count !== draft.headcount : false;
 
-  const capacityResult = useMemo(
-    () => checkCapacity(draft, reservations, isEditing ? id : undefined),
-    [draft, reservations, isEditing, id]
+  // 每個「容量限制服務」時段各自檢查容量（以服務時段為單位，排除自己這一筆）
+  const capacityResults = useMemo(
+    () =>
+      draft.services.map((entry) => ({
+        entry,
+        result: checkCapacity(entry, draft.reservation_date, reservations, entry.entry_id),
+      })),
+    [draft.services, draft.reservation_date, reservations]
   );
+  const anyExceeded = capacityResults.some((c) => c.result.exceeded);
 
   const nextNo = useMemo(() => previewNextReservationNo(draft.reservation_date), [draft.reservation_date, previewNextReservationNo]);
 
@@ -112,7 +115,7 @@ export default function ReservationFormPage() {
   }
 
   function confirmSave() {
-    if (errors.length > 0 || capacityResult.exceeded) return;
+    if (errors.length > 0 || anyExceeded) return;
     if (isEditing && id) {
       updateReservation(id, draft);
       setSuccessMsg("已儲存修改。");
@@ -149,6 +152,8 @@ export default function ReservationFormPage() {
 
       {step === "form" && (
         <div className="bg-white rounded-xl shadow p-4 space-y-5">
+          <h3 className="text-sm font-semibold text-gray-500">共同資料</h3>
+
           <FieldGroup label="預約日期" required>
             <input
               type="date"
@@ -159,7 +164,7 @@ export default function ReservationFormPage() {
               className="border rounded-lg px-3 py-2"
             />
             <p className="text-xs text-gray-400 mt-1">
-              開放預約日期為 {EVENT_START_DATE} ～ {EVENT_END_DATE}。下一個預約單編號預覽：<span className="font-mono">{nextNo}</span>
+              開放預約日期為 {EVENT_START_DATE} ～ {EVENT_END_DATE}。這張預約單的預約單編號預覽：<span className="font-mono">{isEditing ? getReservation(id!)?.reservation_no : nextNo}</span>
             </p>
           </FieldGroup>
 
@@ -181,44 +186,6 @@ export default function ReservationFormPage() {
             )}
           </FieldGroup>
 
-          <FieldGroup label="服務項目" required>
-            <div className="flex flex-wrap gap-2">
-              {SERVICE_OPTIONS.map((s) => (
-                <button
-                  key={s}
-                  type="button"
-                  onClick={() => onServiceChange(s)}
-                  className={`px-3 py-1.5 rounded-lg text-sm border ${
-                    draft.service === s ? "bg-brand-600 text-white border-brand-600" : "border-gray-300 text-gray-600 hover:border-brand-400"
-                  }`}
-                >
-                  {SERVICE_LABELS[s]}
-                </button>
-              ))}
-            </div>
-          </FieldGroup>
-
-          {draft.service !== "transport" && (
-            <FieldGroup label="預約人數" required>
-              <input
-                type="number"
-                min={1}
-                step={1}
-                value={draft.headcount}
-                onChange={(e) => patch({ headcount: Math.trunc(Number(e.target.value)) || 0 })}
-                className="border rounded-lg px-3 py-2 w-32"
-              />
-            </FieldGroup>
-          )}
-
-          {draft.service === "meal" && draft.meal && (
-            <MealFieldsBlock draft={draft} patch={patch} mealMismatch={mealMismatch} />
-          )}
-          {draft.service === "transport" && draft.transport && <TransportFieldsBlock draft={draft} patch={patch} />}
-          {draft.service === "therapy" && draft.therapy && <TherapyFieldsBlock draft={draft} patch={patch} />}
-          {draft.service === "fitness" && draft.fitness && <FitnessFieldsBlock draft={draft} patch={patch} />}
-          {draft.service === "sports_science" && draft.sportsScience && <SportsScienceFieldsBlock draft={draft} patch={patch} />}
-
           <FieldGroup label="聯絡人">
             <input value={draft.contact_person} onChange={(e) => patch({ contact_person: e.target.value })} className="border rounded-lg px-3 py-2 w-full max-w-xs" />
           </FieldGroup>
@@ -228,6 +195,30 @@ export default function ReservationFormPage() {
           <FieldGroup label="備註">
             <textarea value={draft.notes} onChange={(e) => patch({ notes: e.target.value })} className="border rounded-lg px-3 py-2 w-full" rows={2} />
           </FieldGroup>
+
+          <div className="border-t pt-4">
+            <h3 className="text-sm font-semibold text-gray-500 mb-2">服務項目（可複選，一張預約單可以同時包含多個服務）</h3>
+            <div className="flex flex-wrap gap-3">
+              {SERVICE_OPTIONS.map((s) => {
+                const checked = draft.services.some((entry) => entry.service === s);
+                return (
+                  <label
+                    key={s}
+                    className={`px-3 py-1.5 rounded-lg text-sm border cursor-pointer select-none ${
+                      checked ? "bg-brand-600 text-white border-brand-600" : "border-gray-300 text-gray-600 hover:border-brand-400"
+                    }`}
+                  >
+                    <input type="checkbox" className="hidden" checked={checked} onChange={(e) => toggleService(s, e.target.checked)} />
+                    {SERVICE_LABELS[s]}
+                  </label>
+                );
+              })}
+            </div>
+          </div>
+
+          {draft.services.map((entry) => (
+            <ServiceEntryBlock key={entry.entry_id} entry={entry} patchEntry={patchEntry} onRemove={() => toggleService(entry.service, false)} />
+          ))}
 
           {attempted && errors.length > 0 && (
             <div className="bg-red-50 border border-red-200 text-red-700 rounded-lg p-3 text-sm">
@@ -258,66 +249,20 @@ export default function ReservationFormPage() {
           <h3 className="font-semibold">請確認以下預約內容</h3>
           <ReservationSummary data={draft} reservationNo={isEditing ? getReservation(id!)?.reservation_no : nextNo} />
 
-          {mealMismatch && (
-            <p className="text-sm text-yellow-700 bg-yellow-50 border border-yellow-200 rounded-lg p-2">
-              提醒：餐食份數（{draft.meal?.meal_count}）與預約人數（{draft.headcount}）不一致，仍可繼續儲存。
-            </p>
-          )}
-
-          {capacityResult.isCapacityLimited && (
-            <div
-              className={`rounded-lg p-3 text-sm border ${
-                capacityResult.exceeded ? "bg-red-50 border-red-300 text-red-700" : "bg-gray-50 border-gray-200 text-gray-600"
-              }`}
-            >
-              <p className="font-medium">
-                同一時段容量：{capacityResult.capacity ?? "無上限"} 人，這筆預約時間範圍內最高同時使用人數為 {capacityResult.maxConcurrentHeadcount} 人
-                {capacityResult.exceeded ? "（超過容量！）" : ""}
-              </p>
-              {capacityResult.overlapping.length > 0 && (
-                <>
-                  <p className="mt-2 text-xs text-gray-500">時間有交集的既有預約：</p>
-                  <ul className="list-disc list-inside mt-1 space-y-0.5">
-                    {capacityResult.overlapping.map((r) => (
-                      <li key={r.id}>
-                        {r.reservation_no}｜{r.start_time}-{r.end_time}｜{TEAM_LABELS[r.team] === "其他" ? r.team_other_text : TEAM_LABELS[r.team]}｜{r.headcount}
-                        人
-                      </li>
-                    ))}
-                  </ul>
-                </>
-              )}
-              {capacityResult.exceeded && (
-                <>
-                  <p className="mt-2 font-semibold">以下時間區段實際超過容量上限，無法確認新增，請調整時間或人數：</p>
-                  <ul className="list-disc list-inside mt-1 space-y-0.5">
-                    {capacityResult.violatingSegments.map((seg, i) => (
-                      <li key={i}>
-                        {seg.start}-{seg.end}｜該時段共 {seg.totalHeadcount} 人（超過容量 {capacityResult.capacity} 人）
-                        {seg.contributing.length > 0 && <>，含既有預約：{seg.contributing.map((r) => r.reservation_no).join("、")}</>}
-                      </li>
-                    ))}
-                  </ul>
-                </>
-              )}
-            </div>
-          )}
-
-          {!capacityResult.isCapacityLimited &&
-            draft.service === "therapy" &&
-            draft.therapy?.therapy_branch === "doctor" &&
-            capacityResult.overlapping.length > 0 && (
-              <div className="rounded-lg p-3 text-sm bg-blue-50 border border-blue-200 text-blue-700">
-                <p className="font-medium">提醒：同一時段已有其他醫師治療預約（不會擋下，僅供參考）</p>
-                <ul className="list-disc list-inside mt-1 space-y-0.5">
-                  {capacityResult.overlapping.map((r) => (
-                    <li key={r.id}>
-                      {r.reservation_no}｜{r.start_time}-{r.end_time}｜{r.team === "other" ? r.team_other_text : TEAM_LABELS[r.team]}
-                    </li>
-                  ))}
-                </ul>
+          {draft.services.map((entry) => {
+            const mealMismatch = entry.service === "meal" && entry.meal ? entry.meal.meal_count !== entry.headcount : false;
+            const cap = capacityResults.find((c) => c.entry.entry_id === entry.entry_id)?.result;
+            return (
+              <div key={entry.entry_id} className="space-y-2">
+                {mealMismatch && (
+                  <p className="text-sm text-yellow-700 bg-yellow-50 border border-yellow-200 rounded-lg p-2">
+                    提醒（餐食）：餐食份數（{entry.meal?.meal_count}）與預約人數（{entry.headcount}）不一致，仍可繼續儲存。
+                  </p>
+                )}
+                {cap && <CapacityNotice entry={entry} cap={cap} />}
               </div>
-            )}
+            );
+          })}
 
           <div className="flex gap-3">
             <button onClick={() => setStep("form")} className="border rounded-lg px-4 py-2 text-sm">
@@ -325,7 +270,7 @@ export default function ReservationFormPage() {
             </button>
             <button
               onClick={confirmSave}
-              disabled={capacityResult.exceeded}
+              disabled={anyExceeded}
               className="bg-brand-600 text-white rounded-lg px-4 py-2 text-sm disabled:opacity-40 disabled:cursor-not-allowed"
             >
               {isEditing ? "確認儲存" : "確認新增"}
@@ -337,46 +282,104 @@ export default function ReservationFormPage() {
   );
 }
 
+function CapacityNotice({ entry, cap }: { entry: ServiceEntry; cap: CapacityCheckResult }) {
+  if (cap.isCapacityLimited) {
+    return (
+      <div className={`rounded-lg p-3 text-sm border ${cap.exceeded ? "bg-red-50 border-red-300 text-red-700" : "bg-gray-50 border-gray-200 text-gray-600"}`}>
+        <p className="font-medium">
+          【{SERVICE_LABELS[entry.service]}】同一時段容量：{cap.capacity ?? "無上限"} 人，這個服務時段範圍內最高同時使用人數為 {cap.maxConcurrentHeadcount} 人
+          {cap.exceeded ? "（超過容量！）" : ""}
+        </p>
+        {cap.overlapping.length > 0 && (
+          <>
+            <p className="mt-2 text-xs text-gray-500">時間有交集的既有預約：</p>
+            <ul className="list-disc list-inside mt-1 space-y-0.5">
+              {cap.overlapping.map((ref) => (
+                <li key={ref.entry.entry_id}>
+                  {ref.reservationNo}｜{ref.entry.start_time}-{ref.entry.end_time}｜{ref.entry.headcount} 人
+                </li>
+              ))}
+            </ul>
+          </>
+        )}
+        {cap.exceeded && (
+          <>
+            <p className="mt-2 font-semibold">以下時間區段實際超過容量上限，無法確認新增，請調整時間或人數：</p>
+            <ul className="list-disc list-inside mt-1 space-y-0.5">
+              {cap.violatingSegments.map((seg, i) => (
+                <li key={i}>
+                  {seg.start}-{seg.end}｜該時段共 {seg.totalHeadcount} 人（超過容量 {cap.capacity} 人）
+                  {seg.contributing.length > 0 && <>，含既有預約：{seg.contributing.map((c) => c.reservationNo).join("、")}</>}
+                </li>
+              ))}
+            </ul>
+          </>
+        )}
+      </div>
+    );
+  }
+  if (entry.service === "therapy" && entry.therapy?.therapy_branch === "doctor" && cap.overlapping.length > 0) {
+    return (
+      <div className="rounded-lg p-3 text-sm bg-blue-50 border border-blue-200 text-blue-700">
+        <p className="font-medium">提醒（醫師治療）：同一時段已有其他醫師治療預約（不會擋下，僅供參考）</p>
+        <ul className="list-disc list-inside mt-1 space-y-0.5">
+          {cap.overlapping.map((ref) => (
+            <li key={ref.entry.entry_id}>
+              {ref.reservationNo}｜{ref.entry.start_time}-{ref.entry.end_time}
+            </li>
+          ))}
+        </ul>
+      </div>
+    );
+  }
+  return null;
+}
+
 function validateDraft(draft: ReservationDraft): string[] {
   const errors: string[] = [];
   if (!isDateInEventRange(draft.reservation_date)) errors.push(`預約日期須介於 ${EVENT_START_DATE} ～ ${EVENT_END_DATE} 之間`);
   if (draft.team === "other" && !draft.team_other_text.trim()) errors.push("選擇「其他」代表隊時，請填寫代表隊或單位名稱");
-  if (!Number.isInteger(draft.headcount) || draft.headcount <= 0) errors.push("預約人數須為正整數");
-  if (!draft.start_time) errors.push("請填寫開始時間");
+  if (draft.services.length === 0) errors.push("請至少勾選一項服務項目");
 
-  if (draft.service === "meal" && draft.meal) {
-    const m = draft.meal;
-    if (!Number.isInteger(m.meal_count) || m.meal_count <= 0) errors.push("餐食份數須為正整數");
-    if (!m.serve_location.trim()) errors.push("請填寫餐食地點");
-    if (!Number.isInteger(m.vegetarian_count) || m.vegetarian_count < 0) errors.push("素食份數須為 0 或正整數");
-    else if (m.vegetarian_count > m.meal_count) errors.push("素食份數不得大於餐食總份數");
-  }
+  for (const entry of draft.services) {
+    const label = SERVICE_LABELS[entry.service];
+    if (!Number.isInteger(entry.headcount) || entry.headcount <= 0) errors.push(`【${label}】預約人數須為正整數`);
+    if (!entry.start_time) errors.push(`【${label}】請填寫開始時間`);
 
-  if (draft.service === "transport" && draft.transport) {
-    const t = draft.transport;
-    if (t.outbound_pickup === "other" && !t.outbound_pickup_other.trim()) errors.push("去程上車地點選「其他」時請填寫說明");
-    if (t.outbound_dropoff === "other" && !t.outbound_dropoff_other.trim()) errors.push("去程下車地點選「其他」時請填寫說明");
-    if (!Number.isInteger(t.passenger_count) || t.passenger_count <= 0) errors.push("乘車人數須為正整數");
-    if (!Number.isInteger(t.wheelchair_count) || t.wheelchair_count < 0) errors.push("輪椅使用人數須為 0 或正整數");
-    if (t.needs_accessible_vehicle && t.wheelchair_count <= 0) errors.push("需要福祉車時請填寫輪椅使用人數");
-    if (Number.isInteger(t.wheelchair_count) && Number.isInteger(t.passenger_count) && t.wheelchair_count > t.passenger_count) {
-      errors.push("輪椅使用人數不得大於去程乘車人數");
+    if (entry.service === "meal" && entry.meal) {
+      const m = entry.meal;
+      if (!Number.isInteger(m.meal_count) || m.meal_count <= 0) errors.push(`【${label}】餐食份數須為正整數`);
+      if (!m.serve_location.trim()) errors.push(`【${label}】請填寫餐食地點`);
+      if (!Number.isInteger(m.vegetarian_count) || m.vegetarian_count < 0) errors.push(`【${label}】素食份數須為 0 或正整數`);
+      else if (m.vegetarian_count > m.meal_count) errors.push(`【${label}】素食份數不得大於餐食總份數`);
     }
-    if (t.transport_type === "round_trip") {
-      if (!t.return_time) errors.push("來回接駁請填寫回程上車時間");
-      if (!t.return_pickup) errors.push("來回接駁請選擇回程上車地點");
-      if (t.return_pickup === "other" && !t.return_pickup_other.trim()) errors.push("回程上車地點選「其他」時請填寫說明");
-      if (!t.return_dropoff) errors.push("來回接駁請選擇回程下車地點");
-      if (t.return_dropoff === "other" && !t.return_dropoff_other.trim()) errors.push("回程下車地點選「其他」時請填寫說明");
-      if (!Number.isInteger(t.return_count) || t.return_count <= 0) errors.push("來回接駁請填寫正確的回程人數（正整數）");
-    }
-  }
 
-  if ((draft.service === "therapy" || draft.service === "fitness" || draft.service === "sports_science") && !draft.end_time) {
-    errors.push("請填寫結束時間");
-  }
-  if (draft.end_time && draft.start_time && draft.end_time <= draft.start_time) {
-    errors.push("結束時間須晚於開始時間");
+    if (entry.service === "transport" && entry.transport) {
+      const t = entry.transport;
+      if (t.outbound_pickup === "other" && !t.outbound_pickup_other.trim()) errors.push(`【${label}】去程上車地點選「其他」時請填寫說明`);
+      if (t.outbound_dropoff === "other" && !t.outbound_dropoff_other.trim()) errors.push(`【${label}】去程下車地點選「其他」時請填寫說明`);
+      if (!Number.isInteger(t.passenger_count) || t.passenger_count <= 0) errors.push(`【${label}】乘車人數須為正整數`);
+      if (!Number.isInteger(t.wheelchair_count) || t.wheelchair_count < 0) errors.push(`【${label}】輪椅使用人數須為 0 或正整數`);
+      if (t.needs_accessible_vehicle && t.wheelchair_count <= 0) errors.push(`【${label}】需要福祉車時請填寫輪椅使用人數`);
+      if (Number.isInteger(t.wheelchair_count) && Number.isInteger(t.passenger_count) && t.wheelchair_count > t.passenger_count) {
+        errors.push(`【${label}】輪椅使用人數不得大於去程乘車人數`);
+      }
+      if (t.transport_type === "round_trip") {
+        if (!t.return_time) errors.push(`【${label}】來回接駁請填寫回程上車時間`);
+        if (!t.return_pickup) errors.push(`【${label}】來回接駁請選擇回程上車地點`);
+        if (t.return_pickup === "other" && !t.return_pickup_other.trim()) errors.push(`【${label}】回程上車地點選「其他」時請填寫說明`);
+        if (!t.return_dropoff) errors.push(`【${label}】來回接駁請選擇回程下車地點`);
+        if (t.return_dropoff === "other" && !t.return_dropoff_other.trim()) errors.push(`【${label}】回程下車地點選「其他」時請填寫說明`);
+        if (!Number.isInteger(t.return_count) || t.return_count <= 0) errors.push(`【${label}】來回接駁請填寫正確的回程人數（正整數）`);
+      }
+    }
+
+    if (serviceRequiresEndTime(entry.service) && !entry.end_time) {
+      errors.push(`【${label}】請填寫結束時間`);
+    }
+    if (entry.end_time && entry.start_time && entry.end_time <= entry.start_time) {
+      errors.push(`【${label}】結束時間須晚於開始時間`);
+    }
   }
 
   return errors;
@@ -393,22 +396,55 @@ function FieldGroup({ label, required, children }: { label: string; required?: b
   );
 }
 
-function MealFieldsBlock({
-  draft,
-  patch,
-  mealMismatch,
+function ServiceEntryBlock({
+  entry,
+  patchEntry,
+  onRemove,
 }: {
-  draft: ReservationDraft;
-  patch: (p: Partial<ReservationDraft>) => void;
-  mealMismatch: boolean;
+  entry: ServiceEntry;
+  patchEntry: (entryId: string, p: Partial<ServiceEntry>) => void;
+  onRemove: () => void;
 }) {
-  const meal = draft.meal!;
+  const patch = (p: Partial<ServiceEntry>) => patchEntry(entry.entry_id, p);
+  return (
+    <div className="border-t pt-4 space-y-4">
+      <div className="flex items-center justify-between">
+        <h4 className="text-sm font-semibold text-brand-700">{SERVICE_LABELS[entry.service]}預約欄位</h4>
+        <button type="button" onClick={onRemove} className="text-xs text-red-500 underline">
+          移除這個服務
+        </button>
+      </div>
+
+      {entry.service !== "transport" && (
+        <FieldGroup label="預約人數" required>
+          <input
+            type="number"
+            min={1}
+            step={1}
+            value={entry.headcount}
+            onChange={(e) => patch({ headcount: Math.trunc(Number(e.target.value)) || 0 })}
+            className="border rounded-lg px-3 py-2 w-32"
+          />
+        </FieldGroup>
+      )}
+
+      {entry.service === "meal" && entry.meal && <MealFieldsBlock entry={entry} patch={patch} />}
+      {entry.service === "transport" && entry.transport && <TransportFieldsBlock entry={entry} patch={patch} />}
+      {entry.service === "therapy" && entry.therapy && <TherapyFieldsBlock entry={entry} patch={patch} />}
+      {entry.service === "fitness" && entry.fitness && <FitnessFieldsBlock entry={entry} patch={patch} />}
+      {entry.service === "sports_science" && entry.sportsScience && <SportsScienceFieldsBlock entry={entry} patch={patch} />}
+    </div>
+  );
+}
+
+function MealFieldsBlock({ entry, patch }: { entry: ServiceEntry; patch: (p: Partial<ServiceEntry>) => void }) {
+  const meal = entry.meal!;
+  const mealMismatch = meal.meal_count !== entry.headcount;
   function patchMeal(p: Partial<typeof meal>) {
     patch({ meal: { ...meal, ...p } });
   }
   return (
-    <div className="border-t pt-4 space-y-4">
-      <h4 className="text-sm font-semibold text-brand-700">餐食預約欄位</h4>
+    <div className="space-y-4">
       <FieldGroup label="餐別" required>
         <div className="flex gap-2">
           {(["lunch", "dinner"] as const).map((v) => (
@@ -424,7 +460,7 @@ function MealFieldsBlock({
         </div>
       </FieldGroup>
       <FieldGroup label="用餐／送餐時間" required>
-        <input type="time" value={draft.start_time} onChange={(e) => patch({ start_time: e.target.value })} className="border rounded-lg px-3 py-2" />
+        <input type="time" value={entry.start_time} onChange={(e) => patch({ start_time: e.target.value })} className="border rounded-lg px-3 py-2" />
       </FieldGroup>
       <FieldGroup label="餐食份數" required>
         <input type="number" min={1} step={1} value={meal.meal_count} onChange={(e) => patchMeal({ meal_count: Math.trunc(Number(e.target.value)) || 0 })} className="border rounded-lg px-3 py-2 w-32" />
@@ -483,14 +519,13 @@ function LocationSelect({
   );
 }
 
-function TransportFieldsBlock({ draft, patch }: { draft: ReservationDraft; patch: (p: Partial<ReservationDraft>) => void }) {
-  const t = draft.transport!;
+function TransportFieldsBlock({ entry, patch }: { entry: ServiceEntry; patch: (p: Partial<ServiceEntry>) => void }) {
+  const t = entry.transport!;
   function patchT(p: Partial<typeof t>) {
     patch({ transport: { ...t, ...p } });
   }
   return (
-    <div className="border-t pt-4 space-y-4">
-      <h4 className="text-sm font-semibold text-brand-700">交通接駁預約欄位</h4>
+    <div className="space-y-4">
       <p className="text-xs text-gray-400">
         目前可用車輛：一般車輛 4 台（每台最多 9 人）、福祉車 1 台。本系統只負責蒐集接駁需求，不會自動排車或指派車輛。
       </p>
@@ -509,7 +544,7 @@ function TransportFieldsBlock({ draft, patch }: { draft: ReservationDraft; patch
         </div>
       </FieldGroup>
       <FieldGroup label="去程上車時間" required>
-        <input type="time" value={draft.start_time} onChange={(e) => patch({ start_time: e.target.value })} className="border rounded-lg px-3 py-2" />
+        <input type="time" value={entry.start_time} onChange={(e) => patch({ start_time: e.target.value })} className="border rounded-lg px-3 py-2" />
       </FieldGroup>
       <LocationSelect
         label="去程上車地點"
@@ -588,11 +623,10 @@ function TransportFieldsBlock({ draft, patch }: { draft: ReservationDraft; patch
   );
 }
 
-function TherapyFieldsBlock({ draft, patch }: { draft: ReservationDraft; patch: (p: Partial<ReservationDraft>) => void }) {
-  const th = draft.therapy!;
+function TherapyFieldsBlock({ entry, patch }: { entry: ServiceEntry; patch: (p: Partial<ServiceEntry>) => void }) {
+  const th = entry.therapy!;
   return (
-    <div className="border-t pt-4 space-y-4">
-      <h4 className="text-sm font-semibold text-brand-700">防護治療預約欄位</h4>
+    <div className="space-y-4">
       <FieldGroup label="分支項目" required>
         <select value={th.therapy_branch} onChange={(e) => patch({ therapy: { ...th, therapy_branch: e.target.value as typeof th.therapy_branch } })} className="border rounded-lg px-3 py-2">
           {THERAPY_BRANCH_OPTIONS.map((b) => (
@@ -605,10 +639,10 @@ function TherapyFieldsBlock({ draft, patch }: { draft: ReservationDraft; patch: 
       </FieldGroup>
       <div className="flex gap-4">
         <FieldGroup label="開始時間" required>
-          <input type="time" value={draft.start_time} onChange={(e) => patch({ start_time: e.target.value })} className="border rounded-lg px-3 py-2" />
+          <input type="time" value={entry.start_time} onChange={(e) => patch({ start_time: e.target.value })} className="border rounded-lg px-3 py-2" />
         </FieldGroup>
         <FieldGroup label="結束時間" required>
-          <input type="time" value={draft.end_time} onChange={(e) => patch({ end_time: e.target.value })} className="border rounded-lg px-3 py-2" />
+          <input type="time" value={entry.end_time} onChange={(e) => patch({ end_time: e.target.value })} className="border rounded-lg px-3 py-2" />
         </FieldGroup>
       </div>
       <FieldGroup label="需求說明">
@@ -618,11 +652,10 @@ function TherapyFieldsBlock({ draft, patch }: { draft: ReservationDraft; patch: 
   );
 }
 
-function FitnessFieldsBlock({ draft, patch }: { draft: ReservationDraft; patch: (p: Partial<ReservationDraft>) => void }) {
-  const f = draft.fitness!;
+function FitnessFieldsBlock({ entry, patch }: { entry: ServiceEntry; patch: (p: Partial<ServiceEntry>) => void }) {
+  const f = entry.fitness!;
   return (
-    <div className="border-t pt-4 space-y-4">
-      <h4 className="text-sm font-semibold text-brand-700">體能訓練預約欄位</h4>
+    <div className="space-y-4">
       <FieldGroup label="分支項目" required>
         <select value={f.fitness_branch} onChange={(e) => patch({ fitness: { ...f, fitness_branch: e.target.value as typeof f.fitness_branch } })} className="border rounded-lg px-3 py-2">
           {FITNESS_BRANCH_OPTIONS.map((b) => (
@@ -634,10 +667,10 @@ function FitnessFieldsBlock({ draft, patch }: { draft: ReservationDraft; patch: 
       </FieldGroup>
       <div className="flex gap-4">
         <FieldGroup label="開始時間" required>
-          <input type="time" value={draft.start_time} onChange={(e) => patch({ start_time: e.target.value })} className="border rounded-lg px-3 py-2" />
+          <input type="time" value={entry.start_time} onChange={(e) => patch({ start_time: e.target.value })} className="border rounded-lg px-3 py-2" />
         </FieldGroup>
         <FieldGroup label="結束時間" required>
-          <input type="time" value={draft.end_time} onChange={(e) => patch({ end_time: e.target.value })} className="border rounded-lg px-3 py-2" />
+          <input type="time" value={entry.end_time} onChange={(e) => patch({ end_time: e.target.value })} className="border rounded-lg px-3 py-2" />
         </FieldGroup>
       </div>
       <FieldGroup label="訓練需求">
@@ -647,12 +680,11 @@ function FitnessFieldsBlock({ draft, patch }: { draft: ReservationDraft; patch: 
   );
 }
 
-function SportsScienceFieldsBlock({ draft, patch }: { draft: ReservationDraft; patch: (p: Partial<ReservationDraft>) => void }) {
-  const s = draft.sportsScience!;
+function SportsScienceFieldsBlock({ entry, patch }: { entry: ServiceEntry; patch: (p: Partial<ServiceEntry>) => void }) {
+  const s = entry.sportsScience!;
   const capLabel: Record<string, number> = { physio_test: 5, air_massage: 12, compression_chamber: 5, individual_consult: 2, nutrition_consult: 2 };
   return (
-    <div className="border-t pt-4 space-y-4">
-      <h4 className="text-sm font-semibold text-brand-700">運科支援預約欄位</h4>
+    <div className="space-y-4">
       <FieldGroup label="分支項目" required>
         <select
           value={s.sports_science_branch}
@@ -668,10 +700,10 @@ function SportsScienceFieldsBlock({ draft, patch }: { draft: ReservationDraft; p
       </FieldGroup>
       <div className="flex gap-4">
         <FieldGroup label="開始時間" required>
-          <input type="time" value={draft.start_time} onChange={(e) => patch({ start_time: e.target.value })} className="border rounded-lg px-3 py-2" />
+          <input type="time" value={entry.start_time} onChange={(e) => patch({ start_time: e.target.value })} className="border rounded-lg px-3 py-2" />
         </FieldGroup>
         <FieldGroup label="結束時間" required>
-          <input type="time" value={draft.end_time} onChange={(e) => patch({ end_time: e.target.value })} className="border rounded-lg px-3 py-2" />
+          <input type="time" value={entry.end_time} onChange={(e) => patch({ end_time: e.target.value })} className="border rounded-lg px-3 py-2" />
         </FieldGroup>
       </div>
       <FieldGroup label="需求說明">

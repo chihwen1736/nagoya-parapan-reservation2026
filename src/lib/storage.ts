@@ -1,4 +1,4 @@
-import { Reservation } from "@/types";
+import { Reservation, normalizeReservation } from "@/types";
 import { parseReservationNo } from "./id";
 
 const STORAGE_KEY = "nagoya-parapan-reservation2026:data:v1";
@@ -23,7 +23,8 @@ export function loadData(): StoredData {
     if (!parsed || !Array.isArray(parsed.reservations)) return emptyStoredData();
     return {
       version: STORAGE_FORMAT_VERSION,
-      reservations: parsed.reservations,
+      // 讀取時一律正規化，讓舊版（單一服務）資料自動轉換成新版的多服務資料結構
+      reservations: (parsed.reservations as unknown[]).map(normalizeReservation),
       maxSeqUsed: parsed.maxSeqUsed && typeof parsed.maxSeqUsed === "object" ? parsed.maxSeqUsed : {},
     };
   } catch {
@@ -111,7 +112,8 @@ export function parseBackupJson(text: string): BackupFile {
     app: "nagoya-parapan-reservation2026",
     formatVersion: obj.formatVersion ?? STORAGE_FORMAT_VERSION,
     exportedAt: obj.exportedAt ?? "",
-    reservations: obj.reservations as Reservation[],
+    // 匯入的備份檔也可能是舊版（單一服務）格式，一律正規化成目前的多服務資料結構
+    reservations: (obj.reservations as unknown[]).map(normalizeReservation),
     maxSeqUsed: obj.maxSeqUsed && typeof obj.maxSeqUsed === "object" ? obj.maxSeqUsed : {},
   };
 }

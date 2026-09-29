@@ -5,9 +5,11 @@ import {
   MEAL_TYPE_LABELS,
   Reservation,
   SERVICE_LABELS,
+  ServiceEntry,
   SPORTS_SCIENCE_BRANCH_LABELS,
   TEAM_LABELS,
   THERAPY_BRANCH_LABELS,
+  TransportFields,
   TRANSPORT_LOCATION_LABELS,
 } from "@/types";
 
@@ -27,26 +29,59 @@ function teamName(r: Reservation): string {
   return r.team === "other" ? r.team_other_text || "其他" : TEAM_LABELS[r.team];
 }
 
-function branchName(r: Reservation): string {
-  if (r.service === "therapy" && r.therapy) return THERAPY_BRANCH_LABELS[r.therapy.therapy_branch];
-  if (r.service === "fitness" && r.fitness) return FITNESS_BRANCH_LABELS[r.fitness.fitness_branch];
-  if (r.service === "sports_science" && r.sportsScience) return SPORTS_SCIENCE_BRANCH_LABELS[r.sportsScience.sports_science_branch];
+function branchName(entry: ServiceEntry): string {
+  if (entry.service === "therapy" && entry.therapy) return THERAPY_BRANCH_LABELS[entry.therapy.therapy_branch];
+  if (entry.service === "fitness" && entry.fitness) return FITNESS_BRANCH_LABELS[entry.fitness.fitness_branch];
+  if (entry.service === "sports_science" && entry.sportsScience) return SPORTS_SCIENCE_BRANCH_LABELS[entry.sportsScience.sports_science_branch];
   return "";
 }
 
-function requirementContent(r: Reservation): string {
-  if (r.service === "meal" && r.meal) return r.meal.meal_content;
-  if (r.service === "transport" && r.transport) return r.transport.passenger_note;
-  if (r.service === "therapy" && r.therapy) return r.therapy.requirement_note;
-  if (r.service === "fitness" && r.fitness) return r.fitness.training_requirement;
-  if (r.service === "sports_science" && r.sportsScience) return r.sportsScience.requirement_note;
+function requirementContent(entry: ServiceEntry): string {
+  if (entry.service === "meal" && entry.meal) return entry.meal.meal_content;
+  if (entry.service === "transport" && entry.transport) return entry.transport.passenger_note;
+  if (entry.service === "therapy" && entry.therapy) return entry.therapy.requirement_note;
+  if (entry.service === "fitness" && entry.fitness) return entry.fitness.training_requirement;
+  if (entry.service === "sports_science" && entry.sportsScience) return entry.sportsScience.requirement_note;
   return "";
+}
+
+function entryLocation(entry: ServiceEntry): string {
+  if (entry.service === "meal" && entry.meal) return entry.meal.serve_location;
+  if (entry.service === "transport" && entry.transport) {
+    return `${locationLabel(entry.transport.outbound_pickup, entry.transport.outbound_pickup_other)} → ${locationLabel(
+      entry.transport.outbound_dropoff,
+      entry.transport.outbound_dropoff_other
+    )}`;
+  }
+  return "";
+}
+
+/** 「每日預約總表」備註欄：合併該服務項目自己的需求內容與整張預約單共用的備註，避免遺漏資訊 */
+function combinedNote(r: Reservation, entry: ServiceEntry): string {
+  const parts = [requirementContent(entry), r.notes].map((s) => (s ?? "").trim()).filter(Boolean);
+  return parts.join("；");
 }
 
 function locationLabel(code: string, other: string): string {
   if (!code) return "";
   if (code === "other") return other || "其他";
   return TRANSPORT_LOCATION_LABELS[code as keyof typeof TRANSPORT_LOCATION_LABELS] ?? code;
+}
+
+/** 每張預約單攤平成「一個服務項目一列」，並附上所屬預約單資訊，供各工作表共用 */
+interface FlatRow {
+  reservation: Reservation;
+  entry: ServiceEntry;
+}
+
+function flattenRows(reservations: Reservation[]): FlatRow[] {
+  const flat: FlatRow[] = [];
+  for (const r of reservations) {
+    for (const entry of r.services) {
+      flat.push({ reservation: r, entry });
+    }
+  }
+  return flat;
 }
 
 // ---------- 日期／時間欄位：寫成 Excel 可辨識的真正日期/時間值，而不是純文字 ----------
@@ -189,33 +224,92 @@ function finalizePrintArea(ws: ExcelJS.Worksheet, lastRow: number, colCount: num
   ws.pageSetup.printArea = `A1:${endCol}${lastRow}`;
 }
 
-// ---------- 每日預約總表 ----------
+// ---------- 一、每日預約總表：一個服務項目占一列，同一張預約單的多個服務用相同預約單編號分列呈現 ----------
 
 function buildDailySummarySheet(wb: ExcelJS.Workbook, date: string, rows: Reservation[]) {
-  const headers = ["序號", "預約單編號", "日期", "開始時間", "結束時間", "代表隊", "服務項目", "分支項目", "預約人數", "聯絡人", "聯絡方式", "需求內容", "備註"];
+  const headers = ["日期", "預約單編號", "代表隊", "服務類別", "分支項目", "開始時間", "結束時間", "人數或份數", "地點", "聯絡人", "聯絡電話", "備註"];
   const ws = wb.addWorksheet("每日預約總表");
-  setupSheetPage(ws, "每日預約總表", date, headers, { columnWidths: [6, 14, 12, 10, 10, 12, 10, 16, 8, 10, 14, 26, 20] });
+  setupSheetPage(ws, "每日預約總表", date, headers, { columnWidths: [12, 14, 12, 10, 16, 10, 10, 10, 22, 10, 14, 26] });
 
-  const sorted = [...rows].sort((a, b) => a.start_time.localeCompare(b.start_time));
+  const flat = flattenRows(rows).sort((a, b) => a.entry.start_time.localeCompare(b.entry.start_time) || a.reservation.reservation_no.localeCompare(b.reservation.reservation_no));
   let r = 5;
-  if (sorted.length === 0) {
+  if (flat.length === 0) {
     writeEmptyNotice(ws, headers.length, r);
     r += 1;
   } else {
-    sorted.forEach((res, idx) => {
+    flat.forEach(({ reservation: res, entry }) => {
       writeDataRow(ws, r, [
-        idx + 1,
-        res.reservation_no,
         dateCell(res.reservation_date),
-        timeCell(res.start_time),
-        timeCell(res.end_time || ""),
+        res.reservation_no,
         teamName(res),
-        SERVICE_LABELS[res.service],
-        branchName(res),
-        res.headcount,
+        SERVICE_LABELS[entry.service],
+        branchName(entry),
+        timeCell(entry.start_time),
+        timeCell(entry.end_time || ""),
+        entry.service === "meal" && entry.meal ? entry.meal.meal_count : entry.headcount,
+        entryLocation(entry),
         res.contact_person,
         res.contact_method,
-        requirementContent(res),
+        combinedNote(res, entry),
+      ]);
+      r += 1;
+    });
+  }
+  finalizePrintArea(ws, r - 1, headers.length);
+}
+
+// ---------- 二、派車需求明細：交通接駁服務時段的完整明細（一個交通服務時段占一列） ----------
+
+function buildTransportDetailSheet(wb: ExcelJS.Workbook, date: string, rows: Reservation[]) {
+  const headers = [
+    "預約單編號",
+    "代表隊",
+    "去程上車時間",
+    "去程上車地點",
+    "去程下車地點",
+    "去程人數",
+    "回程上車時間",
+    "回程上車地點",
+    "回程下車地點",
+    "回程人數",
+    "是否需要福祉車",
+    "輪椅使用人數",
+    "乘車人員或隊伍說明",
+    "聯絡人",
+    "聯絡電話",
+    "備註",
+  ];
+  const ws = wb.addWorksheet("派車需求明細");
+  setupSheetPage(ws, "派車需求明細", date, headers, {
+    columnWidths: [14, 12, 10, 12, 12, 8, 10, 12, 12, 8, 10, 10, 20, 10, 14, 16],
+  });
+
+  const trans = flattenRows(rows)
+    .filter((f) => f.entry.service === "transport" && f.entry.transport)
+    .sort((a, b) => a.entry.start_time.localeCompare(b.entry.start_time));
+  let r = 5;
+  if (trans.length === 0) {
+    writeEmptyNotice(ws, headers.length, r);
+    r += 1;
+  } else {
+    trans.forEach(({ reservation: res, entry }) => {
+      const t = entry.transport!;
+      writeDataRow(ws, r, [
+        res.reservation_no,
+        teamName(res),
+        timeCell(entry.start_time),
+        locationLabel(t.outbound_pickup, t.outbound_pickup_other),
+        locationLabel(t.outbound_dropoff, t.outbound_dropoff_other),
+        t.passenger_count,
+        timeCell(t.transport_type === "round_trip" ? t.return_time : ""),
+        t.transport_type === "round_trip" ? locationLabel(t.return_pickup, t.return_pickup_other) : "",
+        t.transport_type === "round_trip" ? locationLabel(t.return_dropoff, t.return_dropoff_other) : "",
+        t.transport_type === "round_trip" ? t.return_count : "",
+        t.needs_accessible_vehicle ? "是" : "否",
+        t.wheelchair_count,
+        t.passenger_note,
+        res.contact_person,
+        res.contact_method,
         res.notes,
       ]);
       r += 1;
@@ -224,14 +318,147 @@ function buildDailySummarySheet(wb: ExcelJS.Workbook, date: string, rows: Reserv
   finalizePrintArea(ws, r - 1, headers.length);
 }
 
-// ---------- 餐食 ----------
+// ---------- 三、每日派車表：比照「YYYY-MM-DD 派車」版型的時間×車輛表格 ----------
+
+const VEHICLE_COLUMNS = ["未指定車輛", "車輛1", "車輛2", "車輛3", "車輛4", "福祉車"];
+/** 目前系統設定的每日服務時間範圍（預設 08:00～20:00，每小時一列）；如果當天實際行程超出這個範圍，會自動往外延伸，確保所有行程都能被列出 */
+const DEFAULT_DISPATCH_START_HOUR = 8;
+const DEFAULT_DISPATCH_END_HOUR = 20;
+
+interface DispatchTrip {
+  hour: number;
+  startTime: string;
+  lines: string[];
+}
+
+function transportLocation(t: TransportFields, leg: "outbound" | "return"): string {
+  if (leg === "outbound") {
+    return `${locationLabel(t.outbound_pickup, t.outbound_pickup_other)} → ${locationLabel(t.outbound_dropoff, t.outbound_dropoff_other)}`;
+  }
+  return `${locationLabel(t.return_pickup || "", t.return_pickup_other)} → ${locationLabel(t.return_dropoff || "", t.return_dropoff_other)}`;
+}
+
+/** 交通接駁：單程只產生去程一筆行程；來回則去程、回程各自獨立列入派車表（保留相同預約單編號） */
+function buildTransportTrips(res: Reservation, entry: ServiceEntry): DispatchTrip[] {
+  const t = entry.transport!;
+  const trips: DispatchTrip[] = [];
+  const outboundTime = entry.start_time;
+  trips.push({
+    hour: Math.floor(timeToMinutesLocal(outboundTime) / 60),
+    startTime: outboundTime,
+    lines: [
+      `${outboundTime}${t.transport_type === "round_trip" ? "（去程）" : ""}`,
+      transportLocation(t, "outbound"),
+      teamName(res),
+      `${t.passenger_count}人${t.needs_accessible_vehicle ? "（含福祉車需求）" : ""}`,
+      res.reservation_no,
+      [t.passenger_note, res.notes].filter(Boolean).join("；"),
+    ].filter((l) => l !== ""),
+  });
+  if (t.transport_type === "round_trip" && t.return_time) {
+    trips.push({
+      hour: Math.floor(timeToMinutesLocal(t.return_time) / 60),
+      startTime: t.return_time,
+      lines: [
+        `${t.return_time}（回程）`,
+        transportLocation(t, "return"),
+        teamName(res),
+        `${t.return_count}人`,
+        res.reservation_no,
+        [t.passenger_note, res.notes].filter(Boolean).join("；"),
+      ].filter((l) => l !== ""),
+    });
+  }
+  return trips;
+}
+
+/** 餐食外送才列入派車表（現場用餐／自取都不需要車輛，不列入） */
+function buildMealDeliveryTrip(res: Reservation, entry: ServiceEntry): DispatchTrip | null {
+  const m = entry.meal!;
+  if (m.serve_method !== "delivery") return null;
+  return {
+    hour: Math.floor(timeToMinutesLocal(entry.start_time) / 60),
+    startTime: entry.start_time,
+    lines: [
+      `${entry.start_time} [送餐]`,
+      `${MEAL_TYPE_LABELS[m.meal_type]}｜${m.meal_content || "（未填寫品項）"}｜共 ${m.meal_count} 份`,
+      teamName(res),
+      m.serve_location,
+      res.reservation_no,
+      res.notes,
+    ].filter((l) => l !== ""),
+  };
+}
+
+function timeToMinutesLocal(t: string): number {
+  const parts = t.split(":").map(Number);
+  return (parts[0] ?? 0) * 60 + (parts[1] ?? 0);
+}
+
+function buildDispatchSheet(wb: ExcelJS.Workbook, date: string, rows: Reservation[]) {
+  const flat = flattenRows(rows);
+  const trips: DispatchTrip[] = [];
+  for (const { reservation, entry } of flat) {
+    if (entry.service === "transport" && entry.transport) {
+      trips.push(...buildTransportTrips(reservation, entry));
+    } else if (entry.service === "meal" && entry.meal) {
+      const trip = buildMealDeliveryTrip(reservation, entry);
+      if (trip) trips.push(trip);
+    }
+  }
+  trips.sort((a, b) => a.startTime.localeCompare(b.startTime));
+
+  let startHour = DEFAULT_DISPATCH_START_HOUR;
+  let endHour = DEFAULT_DISPATCH_END_HOUR;
+  for (const trip of trips) {
+    if (trip.hour < startHour) startHour = trip.hour;
+    if (trip.hour > endHour) endHour = trip.hour;
+  }
+
+  const sheetTitle = `${date} 派車`;
+  // Excel 工作表名稱不可包含 \ / ? * [ ]，且長度上限 31 字元；日期格式的標題本來就不含這些符號，長度也遠低於上限
+  const ws = wb.addWorksheet(sheetTitle);
+  const headers = ["時間", ...VEHICLE_COLUMNS];
+  setupSheetPage(ws, sheetTitle, date, headers, { columnWidths: [10, 34, 22, 22, 22, 22, 22] });
+
+  let r = 5;
+  for (let hour = startHour; hour <= endHour; hour++) {
+    const label = `${String(hour).padStart(2, "0")}:00`;
+    const tripsInHour = trips.filter((t) => t.hour === hour);
+    const unassignedCellText = tripsInHour.map((t) => t.lines.join("\n")).join("\n\n");
+    const row = ws.getRow(r);
+    row.getCell(1).value = label;
+    row.getCell(1).alignment = { vertical: "top", horizontal: "center" };
+    row.getCell(1).border = THIN_BORDER;
+    row.getCell(1).font = { bold: true };
+    // 所有接駁／送餐需求目前一律預設放入「未指定車輛」欄，其餘車輛欄留空，供下載後人工剪貼排車
+    for (let col = 2; col <= headers.length; col++) {
+      const cell = row.getCell(col);
+      cell.value = col === 2 ? unassignedCellText || "" : "";
+      cell.alignment = { vertical: "top", horizontal: "left", wrapText: true };
+      cell.border = THIN_BORDER;
+    }
+    const lineCount = tripsInHour.reduce((sum, t) => sum + t.lines.length + 1, 0) || 1;
+    row.height = Math.max(20, lineCount * 14);
+    r += 1;
+  }
+  if (trips.length === 0) {
+    // 沒有任何接駁/送餐需求時，仍保留整張時間表格（不是顯示「本日無預約資料」，因為時間列本身就是固定格式）
+  }
+  ws.views = [{ state: "frozen", ySplit: 4 }];
+  finalizePrintArea(ws, r - 1, headers.length);
+}
+
+// ---------- 四、餐食 ----------
 
 function buildMealSheet(wb: ExcelJS.Workbook, date: string, rows: Reservation[]) {
-  const headers = ["序號", "預約單編號", "代表隊", "餐別", "時間", "供應方式", "地點", "餐食份數", "素食份數", "餐食內容或特殊需求", "聯絡人", "備註"];
+  const headers = ["預約單編號", "代表隊", "餐別", "時間", "供應方式", "地點", "餐食份數", "素食份數", "餐食內容或特殊需求", "聯絡人", "備註"];
   const ws = wb.addWorksheet("餐食");
-  setupSheetPage(ws, "餐食", date, headers, { columnWidths: [6, 14, 12, 8, 8, 12, 14, 10, 10, 26, 10, 18] });
+  setupSheetPage(ws, "餐食", date, headers, { columnWidths: [14, 12, 8, 8, 12, 14, 10, 10, 26, 10, 18] });
 
-  const meals = rows.filter((r) => r.service === "meal" && r.meal).sort((a, b) => a.start_time.localeCompare(b.start_time));
+  const meals = flattenRows(rows)
+    .filter((f) => f.entry.service === "meal" && f.entry.meal)
+    .sort((a, b) => a.entry.start_time.localeCompare(b.entry.start_time));
   let r = 5;
   if (meals.length === 0) {
     writeEmptyNotice(ws, headers.length, r);
@@ -240,14 +467,13 @@ function buildMealSheet(wb: ExcelJS.Workbook, date: string, rows: Reservation[])
     let lunch = 0;
     let dinner = 0;
     let veg = 0;
-    meals.forEach((res, idx) => {
-      const m = res.meal!;
+    meals.forEach(({ reservation: res, entry }) => {
+      const m = entry.meal!;
       writeDataRow(ws, r, [
-        idx + 1,
         res.reservation_no,
         teamName(res),
         MEAL_TYPE_LABELS[m.meal_type],
-        timeCell(res.start_time),
+        timeCell(entry.start_time),
         MEAL_SERVE_METHOD_LABELS[m.serve_method],
         m.serve_location,
         m.meal_count,
@@ -263,12 +489,12 @@ function buildMealSheet(wb: ExcelJS.Workbook, date: string, rows: Reservation[])
     });
     r += 1;
     const footerLabelCell = ws.getCell(r, 1);
-    ws.mergeCells(r, 1, r, 4);
+    ws.mergeCells(r, 1, r, 3);
     footerLabelCell.value = "合計";
     footerLabelCell.font = { bold: true };
     footerLabelCell.alignment = { vertical: "middle", horizontal: "right" };
-    ws.mergeCells(r, 5, r, 8);
-    const summaryCell = ws.getCell(r, 5);
+    ws.mergeCells(r, 4, r, 7);
+    const summaryCell = ws.getCell(r, 4);
     summaryCell.value = `午餐總份數 ${lunch}　晚餐總份數 ${dinner}　素食總份數 ${veg}　全日總份數 ${lunch + dinner}`;
     summaryCell.font = { bold: true };
     summaryCell.alignment = { vertical: "middle", horizontal: "left" };
@@ -276,69 +502,7 @@ function buildMealSheet(wb: ExcelJS.Workbook, date: string, rows: Reservation[])
   finalizePrintArea(ws, r, headers.length);
 }
 
-// ---------- 交通接駁 ----------
-
-function buildTransportSheet(wb: ExcelJS.Workbook, date: string, rows: Reservation[]) {
-  const headers = [
-    "序號",
-    "預約單編號",
-    "代表隊",
-    "去程上車時間",
-    "去程上車地點",
-    "去程下車地點",
-    "去程人數",
-    "回程上車時間",
-    "回程上車地點",
-    "回程下車地點",
-    "回程人數",
-    "是否需要福祉車",
-    "輪椅使用人數",
-    "乘車人員或隊伍說明",
-    "聯絡人",
-    "備註",
-    "車輛安排",
-    "派車備註",
-  ];
-  const ws = wb.addWorksheet("交通接駁");
-  setupSheetPage(ws, "交通接駁", date, headers, {
-    columnWidths: [6, 14, 12, 10, 12, 12, 8, 10, 12, 12, 8, 10, 10, 20, 10, 16, 14, 16],
-  });
-
-  const trans = rows.filter((r) => r.service === "transport" && r.transport).sort((a, b) => a.start_time.localeCompare(b.start_time));
-  let r = 5;
-  if (trans.length === 0) {
-    writeEmptyNotice(ws, headers.length, r);
-    r += 1;
-  } else {
-    trans.forEach((res, idx) => {
-      const t = res.transport!;
-      writeDataRow(ws, r, [
-        idx + 1,
-        res.reservation_no,
-        teamName(res),
-        timeCell(res.start_time),
-        locationLabel(t.outbound_pickup, t.outbound_pickup_other),
-        locationLabel(t.outbound_dropoff, t.outbound_dropoff_other),
-        t.passenger_count,
-        timeCell(t.transport_type === "round_trip" ? t.return_time : ""),
-        t.transport_type === "round_trip" ? locationLabel(t.return_pickup, t.return_pickup_other) : "",
-        t.transport_type === "round_trip" ? locationLabel(t.return_dropoff, t.return_dropoff_other) : "",
-        t.transport_type === "round_trip" ? t.return_count : "",
-        t.needs_accessible_vehicle ? "是" : "否",
-        t.wheelchair_count,
-        t.passenger_note,
-        res.contact_person,
-        res.notes,
-        "",
-        "",
-      ]);
-      r += 1;
-    });
-  }
-  finalizePrintArea(ws, r - 1, headers.length);
-}
-
-// ---------- 防護治療 / 體能訓練 / 運科支援（共用格式） ----------
+// ---------- 五、防護治療 / 六、體能訓練 / 七、運科支援（共用格式） ----------
 
 function buildBranchServiceSheet(
   wb: ExcelJS.Workbook,
@@ -347,26 +511,27 @@ function buildBranchServiceSheet(
   rows: Reservation[],
   service: "therapy" | "fitness" | "sports_science"
 ) {
-  const headers = ["序號", "預約單編號", "開始時間", "結束時間", "代表隊", "分支項目", "預約人數", "需求說明", "聯絡人", "聯絡方式", "備註"];
+  const headers = ["預約單編號", "開始時間", "結束時間", "代表隊", "分支項目", "預約人數", "需求說明", "聯絡人", "聯絡方式", "備註"];
   const ws = wb.addWorksheet(sheetName);
-  setupSheetPage(ws, sheetName, date, headers, { columnWidths: [6, 14, 10, 10, 12, 18, 8, 26, 10, 14, 18] });
+  setupSheetPage(ws, sheetName, date, headers, { columnWidths: [14, 10, 10, 12, 18, 8, 26, 10, 14, 18] });
 
-  const filtered = rows.filter((r) => r.service === service).sort((a, b) => a.start_time.localeCompare(b.start_time));
+  const filtered = flattenRows(rows)
+    .filter((f) => f.entry.service === service)
+    .sort((a, b) => a.entry.start_time.localeCompare(b.entry.start_time));
   let r = 5;
   if (filtered.length === 0) {
     writeEmptyNotice(ws, headers.length, r);
     r += 1;
   } else {
-    filtered.forEach((res, idx) => {
+    filtered.forEach(({ reservation: res, entry }) => {
       writeDataRow(ws, r, [
-        idx + 1,
         res.reservation_no,
-        timeCell(res.start_time),
-        timeCell(res.end_time || ""),
+        timeCell(entry.start_time),
+        timeCell(entry.end_time || ""),
         teamName(res),
-        branchName(res),
-        res.headcount,
-        requirementContent(res),
+        branchName(entry),
+        entry.headcount,
+        requirementContent(entry),
         res.contact_person,
         res.contact_method,
         res.notes,
@@ -382,11 +547,13 @@ export async function buildDailyExportWorkbook(date: string, allReservations: Re
   wb.creator = "2026名古屋亞帕運中繼站簡易預約系統";
   wb.created = new Date();
 
+  // 已刪除的預約本來就不會留在陣列裡；本系統沒有「取消」狀態欄位，因此不需要另外過濾取消/刪除
   const rows = allReservations.filter((r) => r.reservation_date === date);
 
   buildDailySummarySheet(wb, date, rows);
+  buildTransportDetailSheet(wb, date, rows);
+  buildDispatchSheet(wb, date, rows);
   buildMealSheet(wb, date, rows);
-  buildTransportSheet(wb, date, rows);
   buildBranchServiceSheet(wb, "防護治療", date, rows, "therapy");
   buildBranchServiceSheet(wb, "體能訓練", date, rows, "fitness");
   buildBranchServiceSheet(wb, "運科支援", date, rows, "sports_science");

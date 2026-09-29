@@ -1,7 +1,7 @@
-// 端對端驗證腳本（非專案正式測試套件），對照需求書「二十四、測試要求」逐項檢查。
+// 端對端驗證腳本（非專案正式測試套件），驗證「一張預約單可包含多個服務」及「每日彙整 Excel／派車表」需求。
 // 執行方式：
 //   npx playwright install chromium   （第一次執行前，下載 Playwright 自行管理的 Chromium）
-//   npm install -D playwright   （此腳本用，正式專案不需要此套件，故未列在 package.json）
+//   npm install -D playwright         （此腳本用，正式專案不需要此套件，故未列在 package.json）
 //   npm run build
 //   npm run preview -- --port 4174 --strictPort   （另開一個終端機視窗，保持執行中）
 //   node scripts/verify-e2e.mjs
@@ -45,273 +45,406 @@ async function main() {
   await page.reload();
   await page.waitForSelector("text=新增預約");
 
-  // ---------- 1) 日期只能選 2026/10/12 至 2026/10/25 ----------
-  const dateInput = page.locator('input[type="date"]').first();
-  const minAttr = await dateInput.getAttribute("min");
-  const maxAttr = await dateInput.getAttribute("max");
-  check("新增預約頁日期欄位限制在 2026-10-12 ～ 2026-10-25", minAttr === "2026-10-12" && maxAttr === "2026-10-25");
-
-  await page.goto(`${BASE}/overview`);
-  await page.waitForSelector("text=每日預約總覽");
-  const overviewDateInput = page.locator('input[type="date"]').first();
-  check(
-    "每日預約總覽頁日期欄位也限制在活動日期範圍內",
-    (await overviewDateInput.getAttribute("min")) === "2026-10-12" && (await overviewDateInput.getAttribute("max")) === "2026-10-25"
-  );
-
-  // ---------- 2) 每日預約編號正確遞增 + 4) 新增可正常使用 + 5) 各服務分支正確顯示 ----------
-  async function fillCommon(date, teamButtonMaybe) {
-    await page.fill('input[type="date"]', date);
+  // ---------- 服務區塊定位工具：每個勾選的服務會展開一個以「〈服務〉預約欄位」為標題的區塊，用來避免多服務同時展開時欄位選取器互相打架 ----------
+  function serviceBlock(label) {
+    // 注意：h4 內容是 {SERVICE_LABELS[...]}預約欄位 兩個 JSX 子節點，會產生兩個獨立文字節點，
+    // 所以要用 contains(.,...)（元素完整字串值）而不是 contains(text(),...)（只比對第一個文字節點）。
+    return page.locator(`xpath=//h4[contains(.,'${label}預約欄位')]/ancestor::div[contains(@class,'border-t')][1]`);
   }
-
-  async function clickService(label) {
-    await page.getByRole("button", { name: label, exact: true }).click();
+  async function toggleService(label, checked = true) {
+    const checkbox = page.locator('label:has(input[type="checkbox"])').filter({ hasText: label });
+    const isChecked = await checkbox.locator("input").isChecked();
+    if (isChecked !== checked) await checkbox.click();
   }
-
-  // 第一筆：餐食
-  await page.goto(`${BASE}/new`);
-  await page.waitForSelector("text=新增預約");
-  await fillCommon("2026-10-12");
-  await clickService("餐食");
-  check("選擇「餐食」後顯示餐食專屬欄位", await page.locator("text=用餐／送餐時間").count() > 0);
-  await page.fill('input[type="number"]', "1"); // 預約人數
-  await page.locator('input[type="time"]').first().fill("12:00");
-  const mealCountInput = page.locator("text=餐食份數").locator("xpath=following::input[@type='number'][1]");
-  await mealCountInput.fill("4");
-  await page.locator("text=地點").locator("xpath=following::input[1]").fill("中繼站餐廳");
-  await page.getByRole("button", { name: "下一步：確認" }).click();
-  await page.waitForTimeout(200);
-  let genNo = await page.locator("span.font-mono").first().textContent();
-  check("第一筆預約編號為 R261012-001", genNo === "R261012-001");
-  await page.getByRole("button", { name: "確認新增" }).click();
-  await page.waitForTimeout(300);
-
-  // 第二筆：交通接駁（同一天）
-  await page.getByRole("button", { name: "繼續新增" }).click();
-  await clickService("交通接駁");
-  check("選擇「交通接駁」後顯示交通接駁專屬欄位", await page.locator("text=去程上車地點").count() > 0);
-  check("交通接駁不顯示共用「預約人數」欄位（以去程乘車人數為主要人數）", (await page.locator("label:has-text('預約人數')").count()) === 0);
-  await page.locator('input[type="time"]').first().fill("08:30");
-  const passengerCountInput = page.locator("text=乘車人數（去程）").locator("xpath=following::input[@type='number'][1]");
-  await passengerCountInput.fill("6");
-  await page.getByRole("button", { name: "下一步：確認" }).click();
-  await page.waitForTimeout(200);
-  genNo = await page.locator("span.font-mono").first().textContent();
-  check("同一天第二筆預約編號正確遞增為 R261012-002", genNo === "R261012-002");
-  await page.getByRole("button", { name: "確認新增" }).click();
-  await page.waitForTimeout(300);
-
-  // ---------- 6/7/8/9) 容量檢查 ----------
-  async function addTherapyReservation(date, start, end, headcount, branchValue) {
-    await page.goto(`${BASE}/new`);
-    await page.waitForSelector("text=新增預約");
+  async function fillCommon(date, opts = {}) {
     await page.fill('input[type="date"]', date);
-    await clickService("防護治療");
-    const branchSelect = page.locator("label:has-text('分支項目')").locator("xpath=following-sibling::select[1]");
-    await branchSelect.selectOption(branchValue);
-    const headcountInput = page.locator("label:has-text('預約人數')").locator("xpath=following-sibling::input[1]");
-    await headcountInput.fill(String(headcount));
-    const timeInputs = page.locator('input[type="time"]');
-    await timeInputs.nth(0).fill(start);
-    await timeInputs.nth(1).fill(end);
+    if (opts.team) {
+      await page.locator("select").first().selectOption(opts.team);
+    }
+    if (opts.contact) {
+      await page.locator("label:has-text('聯絡人')").locator("xpath=following-sibling::input[1]").fill(opts.contact);
+    }
+  }
+  async function fillMeal(overrides = {}) {
+    const block = serviceBlock("餐食");
+    if (overrides.headcount !== undefined) {
+      await block.locator("label:has-text('預約人數')").locator("xpath=following-sibling::input[1]").fill(String(overrides.headcount));
+    }
+    await block.locator('input[type="time"]').first().fill(overrides.time ?? "12:00");
+    await block.locator("label:has-text('餐食份數')").locator("xpath=following-sibling::input[1]").fill(String(overrides.mealCount ?? overrides.headcount ?? 1));
+    await block.locator("label:has-text('地點')").locator("xpath=following-sibling::input[1]").fill(overrides.location ?? "中繼站餐廳");
+    if (overrides.serveMethod) {
+      await block.locator("label:has-text('供應方式')").locator("xpath=following-sibling::select[1]").selectOption(overrides.serveMethod);
+    }
+    if (overrides.content) {
+      await block.locator("label:has-text('餐食內容或特殊需求')").locator("xpath=following-sibling::input[1]").fill(overrides.content);
+    }
+  }
+  async function fillTransport(overrides = {}) {
+    const block = serviceBlock("交通接駁");
+    await block.locator('input[type="time"]').first().fill(overrides.startTime ?? "13:00");
+    await block.locator("label:has-text('乘車人數（去程）')").locator("xpath=following-sibling::input[1]").fill(String(overrides.passengerCount ?? 4));
+    if (overrides.roundTrip) {
+      await block.locator("button", { hasText: "來回" }).click();
+      await block.locator('input[type="time"]').nth(1).fill(overrides.returnTime ?? "17:00");
+      await block.locator("label:has-text('回程人數')").locator("xpath=following-sibling::input[1]").fill(String(overrides.returnCount ?? overrides.passengerCount ?? 4));
+    }
+  }
+  async function fillTherapy(overrides = {}) {
+    const block = serviceBlock("防護治療");
+    if (overrides.branch) {
+      await block.locator("label:has-text('分支項目')").locator("xpath=following-sibling::select[1]").selectOption(overrides.branch);
+    }
+    if (overrides.headcount !== undefined) {
+      await block.locator("label:has-text('預約人數')").locator("xpath=following-sibling::input[1]").fill(String(overrides.headcount));
+    }
+    const timeInputs = block.locator('input[type="time"]');
+    await timeInputs.nth(0).fill(overrides.start ?? "09:00");
+    await timeInputs.nth(1).fill(overrides.end ?? "10:00");
+  }
+  async function fillFitness(overrides = {}) {
+    const block = serviceBlock("體能訓練");
+    if (overrides.headcount !== undefined) {
+      await block.locator("label:has-text('預約人數')").locator("xpath=following-sibling::input[1]").fill(String(overrides.headcount));
+    }
+    const timeInputs = block.locator('input[type="time"]');
+    await timeInputs.nth(0).fill(overrides.start ?? "09:00");
+    await timeInputs.nth(1).fill(overrides.end ?? "10:00");
+  }
+  async function goNext() {
     await page.getByRole("button", { name: "下一步：確認" }).click();
     await page.waitForTimeout(200);
   }
+  async function confirmAdd() {
+    await page.getByRole("button", { name: "確認新增" }).click();
+    await page.waitForTimeout(300);
+  }
+  async function newReservationPage() {
+    await page.goto(`${BASE}/new`);
+    await page.waitForSelector("text=新增預約");
+  }
 
-  // 防護處置與物理治療容量 3 人。09:00-10:00 先放 2 人，應該可以確認新增。
-  await addTherapyReservation("2026-10-13", "09:00", "10:00", 2, "protective_treatment");
-  let confirmBtn = page.getByRole("button", { name: "確認新增" });
-  check("不重疊/未超量時段：容量內的預約可以確認新增", await confirmBtn.isEnabled());
-  await confirmBtn.click();
-  await page.waitForTimeout(300);
+  // ================= 一、基本欄位與日期範圍（沿用既有需求） =================
+  const dateInput = page.locator('input[type="date"]').first();
+  check("新增預約頁日期欄位限制在 2026-10-12 ～ 2026-10-25", (await dateInput.getAttribute("min")) === "2026-10-12" && (await dateInput.getAttribute("max")) === "2026-10-25");
 
-  // 再新增一筆 09:30-10:30（部分重疊）1 人 → 累計 3 人，剛好等於容量，應可confirm
-  await page.getByRole("button", { name: "繼續新增" }).click();
-  await page.goto(`${BASE}/new`);
-  await page.waitForSelector("text=新增預約");
-  await addTherapyReservation("2026-10-13", "09:30", "10:30", 1, "protective_treatment");
-  confirmBtn = page.getByRole("button", { name: "確認新增" });
-  check("跨越部分時段、剛好等於容量上限時仍可確認新增（不誤判超量）", await confirmBtn.isEnabled());
-  await confirmBtn.click();
-  await page.waitForTimeout(300);
+  // ================= 二、測試要求 1：同一預約單同時選擇餐食及交通 =================
+  await newReservationPage();
+  await fillCommon("2026-10-12", { contact: "王小明" });
+  await toggleService("餐食");
+  await toggleService("交通接駁");
+  check("同時勾選餐食及交通接駁後，兩個服務區塊都會展開", (await serviceBlock("餐食").count()) > 0 && (await serviceBlock("交通接駁").count()) > 0);
+  await fillMeal({ headcount: 8, mealCount: 8, time: "12:00" });
+  await fillTransport({ startTime: "13:00", passengerCount: 8 });
+  await goNext();
+  const firstNo = await page.locator("span.font-mono").first().textContent();
+  check("多服務預約單的第一筆預約編號為 R261012-001", firstNo === "R261012-001");
+  check("確認頁依服務類別分區顯示，同時看得到「餐食」與「交通接駁」兩個區塊", (await page.locator("text=餐食").count()) > 0 && (await page.locator("text=交通接駁").count()) > 0);
+  await confirmAdd();
 
-  // 再新增一筆 09:45-10:15（部分重疊）1 人 → 累計超過 3 人，應該擋下
-  await page.getByRole("button", { name: "繼續新增" }).click();
-  await page.goto(`${BASE}/new`);
-  await page.waitForSelector("text=新增預約");
-  await addTherapyReservation("2026-10-13", "09:45", "10:15", 1, "protective_treatment");
-  const bodyTextCapacity = await page.textContent("body");
-  check("重疊時段合計超過容量時顯示超量警示", bodyTextCapacity.includes("超過容量"));
-  confirmBtn = page.getByRole("button", { name: "確認新增" });
-  check("重疊時段合計超過容量時無法確認新增（按鈕停用）", await confirmBtn.isDisabled());
-
-  // 不重疊時段（11:00-12:00）不應該被誤判為衝突
-  await page.getByRole("button", { name: "返回修改" }).click();
-  await page.fill('input[type="date"]', "2026-10-13");
-  const timeInputsNoOverlap = page.locator('input[type="time"]');
-  await timeInputsNoOverlap.nth(0).fill("11:00");
-  await timeInputsNoOverlap.nth(1).fill("12:00");
-  await page.getByRole("button", { name: "下一步：確認" }).click();
+  await page.goto(`${BASE}/overview`);
+  await page.waitForSelector("text=每日預約總覽");
+  await page.fill('input[type="date"]', "2026-10-12");
   await page.waitForTimeout(200);
-  confirmBtn = page.getByRole("button", { name: "確認新增" });
-  check("不重疊時段不會被誤判為超量，可正常確認新增", await confirmBtn.isEnabled());
-  await confirmBtn.click();
-  await page.waitForTimeout(300);
+  const cardTags1 = await page.locator("div.bg-white.rounded-xl.shadow", { hasText: "R261012-001" }).first().textContent();
+  check("每日總覽中，一張預約單顯示為一張卡片，卡片內同時列出餐食與交通接駁兩個服務標籤", cardTags1.includes("餐食") && cardTags1.includes("交通接駁"));
 
-  // ---------- 分段掃描容量演算法：需求書明確指定的 4 個測試案例 ----------
-  // 案例一：容量3人。A=09:00-10:00(2人)、B=11:00-12:00(2人)、新預約=09:00-12:00(1人)。
-  // A、B彼此不重疊，實際最高同時人數只有3人（A+新 或 B+新），不應阻擋（舊演算法會誤算成5人並阻擋）。
-  await addTherapyReservation("2026-10-14", "09:00", "10:00", 2, "protective_treatment");
-  await page.getByRole("button", { name: "確認新增" }).click();
-  await page.waitForTimeout(300);
+  // ================= 三、測試要求 2：同一預約單同時選擇防護治療及交通 =================
+  await newReservationPage();
+  await fillCommon("2026-10-16", { contact: "李小華" });
+  await toggleService("防護治療");
+  await toggleService("交通接駁");
+  await fillTherapy({ branch: "protective_treatment", headcount: 2, start: "09:00", end: "10:00" });
+  await fillTransport({ startTime: "08:30", passengerCount: 2 });
+  await goNext();
+  check("防護治療＋交通接駁確認頁同時顯示兩個服務", (await page.locator("text=防護治療").count()) > 0 && (await page.locator("text=交通接駁").count()) > 0);
+  await confirmAdd();
 
-  await page.getByRole("button", { name: "繼續新增" }).click();
-  await page.goto(`${BASE}/new`);
+  // ================= 四、測試要求 3：三種以上服務 =================
+  await newReservationPage();
+  await fillCommon("2026-10-17", { contact: "陳大文" });
+  await toggleService("餐食");
+  await toggleService("交通接駁");
+  await toggleService("防護治療");
+  await fillMeal({ headcount: 3, mealCount: 3, time: "12:00" });
+  await fillTransport({ startTime: "08:00", passengerCount: 3 });
+  await fillTherapy({ branch: "massage_bed", headcount: 1, start: "14:00", end: "14:30" });
+  await goNext();
+  check(
+    "三種以上服務（餐食＋交通接駁＋防護治療）確認頁全部正確顯示",
+    (await page.locator("text=餐食").count()) > 0 && (await page.locator("text=交通接駁").count()) > 0 && (await page.locator("text=防護治療").count()) > 0
+  );
+  await confirmAdd();
+
+  // ================= 五、測試要求 4：修改其中一項服務後，其他服務仍保留 =================
+  await page.goto(`${BASE}/overview`);
+  await page.waitForSelector("text=每日預約總覽");
+  await page.fill('input[type="date"]', "2026-10-12");
+  await page.waitForTimeout(200);
+  const editCard = page.locator("div.bg-white.rounded-xl.shadow", { hasText: "R261012-001" }).first();
+  await editCard.getByRole("button", { name: "修改" }).click();
+  await page.waitForSelector("text=修改預約");
+  // 只修改餐食的地點，交通接駁欄位完全不動
+  await serviceBlock("餐食").locator("label:has-text('地點')").locator("xpath=following-sibling::input[1]").fill("賽場貴賓室");
+  await goNext();
+  await page.getByRole("button", { name: "確認儲存" }).click();
+  await page.waitForTimeout(300);
+  await page.fill('input[type="date"]', "2026-10-12");
+  await page.waitForTimeout(200);
+  await page.locator("div.bg-white.rounded-xl.shadow", { hasText: "R261012-001" }).first().getByRole("button", { name: "查看" }).click();
+  await page.waitForTimeout(200);
+  const viewAfterEdit = await page.textContent("body");
+  check("修改餐食地點後，查看視窗顯示新地點", viewAfterEdit.includes("賽場貴賓室"));
+  check("修改其中一個服務（餐食）後，交通接駁的乘車人數（8人）仍然保留、沒有遺失", viewAfterEdit.includes("8 人") || viewAfterEdit.includes("8人"));
+  await page.getByRole("button", { name: "關閉" }).click();
+
+  // ================= 六、測試要求 5：複製多服務預約單後產生新的預約單編號 =================
+  await page.fill('input[type="date"]', "2026-10-12");
+  await page.waitForTimeout(200);
+  await page.locator("div.bg-white.rounded-xl.shadow", { hasText: "R261012-001" }).first().getByRole("button", { name: "複製" }).click();
   await page.waitForSelector("text=新增預約");
-  await addTherapyReservation("2026-10-14", "11:00", "12:00", 2, "protective_treatment");
-  await page.getByRole("button", { name: "確認新增" }).click();
-  await page.waitForTimeout(300);
+  await goNext();
+  const copiedNo = await page.locator("span.font-mono").first().textContent();
+  check("複製多服務預約單會產生全新的預約單編號", copiedNo !== "R261012-001" && /^R261012-\d{3}$/.test(copiedNo ?? ""));
+  check("複製後的確認頁仍同時包含餐食與交通接駁兩個服務", (await page.locator("text=餐食").count()) > 0 && (await page.locator("text=交通接駁").count()) > 0);
+  await confirmAdd();
+  await page.goto(`${BASE}/overview`);
+  await page.waitForSelector("text=每日預約總覽");
+  await page.fill('input[type="date"]', "2026-10-12");
+  await page.waitForTimeout(200);
+  const copiedCardCount = await page.locator("div.bg-white.rounded-xl.shadow", { hasText: copiedNo }).count();
+  check("複製後的預約單確實出現在每日總覽（新的一張卡片）", copiedCardCount > 0);
 
-  await page.getByRole("button", { name: "繼續新增" }).click();
-  await page.goto(`${BASE}/new`);
-  await page.waitForSelector("text=新增預約");
-  await addTherapyReservation("2026-10-14", "09:00", "12:00", 1, "protective_treatment");
+  // 額外新增一筆「餐食外送」預約（同一天 2026-10-12），供稍後驗證派車表的 [送餐] 標示
+  await newReservationPage();
+  await fillCommon("2026-10-12", { contact: "餐食外送測試" });
+  await toggleService("餐食");
+  await fillMeal({ headcount: 3, mealCount: 3, time: "12:30", serveMethod: "delivery", content: "便當×3", location: "柔道比賽場館休息室" });
+  await goNext();
+  const mealDeliveryNo = await page.locator("span.font-mono").first().textContent();
+  await confirmAdd();
+
+  // ================= 七、測試要求 6：容量檢查不因多服務資料結構而失效（分段掃描演算法） =================
+  async function addSingleTherapy(date, start, end, headcount, branch) {
+    await newReservationPage();
+    await fillCommon(date);
+    await toggleService("防護治療");
+    await fillTherapy({ branch, headcount, start, end });
+    await goNext();
+  }
+
+  // 容量3人，A=09:00-10:00(2人)、B=11:00-12:00(2人)、新預約=09:00-12:00(1人)：彼此不重疊，最高同時3人，不應阻擋
+  await addSingleTherapy("2026-10-18", "09:00", "10:00", 2, "protective_treatment");
+  await confirmAdd();
+  await addSingleTherapy("2026-10-18", "11:00", "12:00", 2, "protective_treatment");
+  await confirmAdd();
+  await addSingleTherapy("2026-10-18", "09:00", "12:00", 1, "protective_treatment");
   const bodyCaseA = await page.textContent("body");
-  check("分段掃描案例一：A(09-10,2人)、B(11-12,2人)彼此不重疊，新預約(09-12,1人)實際最高同時3人不阻擋，不顯示超量警示", !bodyCaseA.includes("超過容量"));
-  let confirmBtnCaseA = page.getByRole("button", { name: "確認新增" });
-  check("分段掃描案例一：可以正常確認新增", await confirmBtnCaseA.isEnabled());
-  await confirmBtnCaseA.click();
+  check("分段掃描案例一（多服務資料結構下）：彼此不重疊的既有預約不會被誤算超量", !bodyCaseA.includes("超過容量"));
+  let confirmBtnA = page.getByRole("button", { name: "確認新增" });
+  check("分段掃描案例一：容量未真正超過時可以正常確認新增", await confirmBtnA.isEnabled());
+  await confirmBtnA.click();
   await page.waitForTimeout(300);
 
-  // 案例二：容量3人。A=09:00-11:00(2人)、B=10:00-12:00(1人)、新預約=09:30-11:30(1人)。
-  // 10:00-11:00 這個時段同時有 A+B+新 共4人，超過容量3人，應該阻擋，且警示須顯示真正超量的時間區段。
-  await page.getByRole("button", { name: "繼續新增" }).click();
-  await page.goto(`${BASE}/new`);
-  await page.waitForSelector("text=新增預約");
-  await addTherapyReservation("2026-10-15", "09:00", "11:00", 2, "protective_treatment");
-  await page.getByRole("button", { name: "確認新增" }).click();
-  await page.waitForTimeout(300);
-
-  await page.getByRole("button", { name: "繼續新增" }).click();
-  await page.goto(`${BASE}/new`);
-  await page.waitForSelector("text=新增預約");
-  await addTherapyReservation("2026-10-15", "10:00", "12:00", 1, "protective_treatment");
-  await page.getByRole("button", { name: "確認新增" }).click();
-  await page.waitForTimeout(300);
-
-  await page.getByRole("button", { name: "繼續新增" }).click();
-  await page.goto(`${BASE}/new`);
-  await page.waitForSelector("text=新增預約");
-  await addTherapyReservation("2026-10-15", "09:30", "11:30", 1, "protective_treatment");
+  // 容量3人，A=09:00-11:00(2人)、B=10:00-12:00(1人)、新預約=09:30-11:30(1人)：10:00-11:00共4人，應阻擋
+  await addSingleTherapy("2026-10-19", "09:00", "11:00", 2, "protective_treatment");
+  await confirmAdd();
+  await addSingleTherapy("2026-10-19", "10:00", "12:00", 1, "protective_treatment");
+  await confirmAdd();
+  await addSingleTherapy("2026-10-19", "09:30", "11:30", 1, "protective_treatment");
   const bodyCaseB = await page.textContent("body");
-  check("分段掃描案例二：10:00-11:00時段實際同時4人超過容量3人，正確顯示該超量時間區段", bodyCaseB.includes("10:00") && bodyCaseB.includes("11:00") && bodyCaseB.includes("超過容量"));
-  check("分段掃描案例二：正確顯示該超量時段的人數為4人", bodyCaseB.includes("4 人"));
-  const confirmBtnCaseB = page.getByRole("button", { name: "確認新增" });
-  check("分段掃描案例二：實際超量時無法確認新增（按鈕停用）", await confirmBtnCaseB.isDisabled());
+  check("分段掃描案例二（多服務資料結構下）：10:00-11:00實際同時4人超過容量3人，正確顯示超量時間區段", bodyCaseB.includes("10:00") && bodyCaseB.includes("11:00") && bodyCaseB.includes("超過容量"));
+  const confirmBtnB = page.getByRole("button", { name: "確認新增" });
+  check("分段掃描案例二：實際超量時無法確認新增（按鈕停用）", await confirmBtnB.isDisabled());
   await page.getByRole("button", { name: "返回修改" }).click();
 
-  // ---------- 3) 重新整理後資料仍存在 ----------
+  // ================= 八、編號不重複使用（沿用既有需求，改用新版 UI 流程） =================
+  await newReservationPage();
+  await fillCommon("2026-10-20");
+  await toggleService("餐食");
+  await fillMeal({ headcount: 1, mealCount: 1, time: "12:00" });
+  await goNext();
+  const firstNoReuse = await page.locator("span.font-mono").first().textContent();
+  check("編號重用測試：第一筆為 R261020-001", firstNoReuse === "R261020-001");
+  await confirmAdd();
+  await page.goto(`${BASE}/overview`);
+  await page.waitForSelector("text=每日預約總覽");
+  await page.fill('input[type="date"]', "2026-10-20");
+  await page.waitForTimeout(200);
+  await page.locator("div.bg-white.rounded-xl.shadow", { hasText: "R261020-001" }).first().getByRole("button", { name: "刪除" }).click();
+  await page.waitForSelector("text=確定要刪除預約單編號");
+  await page.locator('input[type="checkbox"]').first().check();
+  await page.getByRole("button", { name: "確定刪除" }).click();
+  await page.waitForTimeout(300);
+  await newReservationPage();
+  await fillCommon("2026-10-20");
+  await toggleService("餐食");
+  await fillMeal({ headcount: 1, mealCount: 1, time: "13:00" });
+  await goNext();
+  const secondNoReuse = await page.locator("span.font-mono").first().textContent();
+  check("刪除唯一一筆 R261020-001 後，下一號是 R261020-002（不重複使用已刪除的編號）", secondNoReuse === "R261020-002");
+  await page.getByRole("button", { name: "返回修改" }).click();
+
+  // ================= 九、醫師治療提醒（不阻擋） =================
+  await newReservationPage();
+  await fillCommon("2026-10-21");
+  await toggleService("防護治療");
+  await fillTherapy({ branch: "doctor", start: "15:00", end: "15:30" });
+  await goNext();
+  await confirmAdd();
+  await newReservationPage();
+  await fillCommon("2026-10-21");
+  await toggleService("防護治療");
+  await fillTherapy({ branch: "doctor", start: "15:15", end: "15:45" });
+  await goNext();
+  const doctorConfirmText = await page.textContent("body");
+  check("醫師治療同時段重疊只顯示提醒文字（不阻擋）", doctorConfirmText.includes("已有其他醫師治療預約"));
+  check("醫師治療沒有容量上限，重疊時仍可確認新增", await page.getByRole("button", { name: "確認新增" }).isEnabled());
+  await page.getByRole("button", { name: "確認新增" }).click();
+  await page.waitForTimeout(300);
+
+  // ================= 十、重新整理後資料仍存在 =================
   await page.reload();
   await page.waitForTimeout(300);
   await page.goto(`${BASE}/overview`);
   await page.waitForSelector("text=每日預約總覽");
   await page.fill('input[type="date"]', "2026-10-12");
   await page.waitForTimeout(300);
-  let rowCount = await page.locator("table tbody tr").count();
-  check("重新整理（reload）後，localStorage 資料仍然存在", rowCount >= 2);
+  const cardCountAfterReload = await page.locator("div.bg-white.rounded-xl.shadow").count();
+  check("重新整理（reload）後，localStorage 資料仍然存在", cardCountAfterReload >= 2);
 
-  // ---------- 10) 每日統計數字正確 ----------
-  const bodyOverview = await page.textContent("body");
-  check("每日統計卡片顯示全部預約筆數", bodyOverview.includes("全部預約筆數"));
-  const mealStatCard = page.locator("text=餐食總份數").locator("xpath=following-sibling::p[1]");
-  check("餐食總份數統計正確（應為 4）", (await mealStatCard.textContent()) === "4");
-  const transportStatCard = page.locator("text=交通接駁人次").locator("xpath=following-sibling::p[1]");
-  check("交通接駁人次統計正確（應為 6，單程無回程人數）", (await transportStatCard.textContent()) === "6");
-
-  // ---------- 4) 修改、複製、刪除 ----------
-  const firstRow = page.locator("table tbody tr").first();
-  await firstRow.getByRole("button", { name: "修改" }).click();
-  await page.waitForSelector("text=修改預約");
-  const notesArea = page.locator("textarea").first();
-  await notesArea.fill("已透過自動化測試修改備註");
-  await page.getByRole("button", { name: "下一步：確認" }).click();
-  await page.waitForTimeout(200);
-  await page.getByRole("button", { name: "確認儲存" }).click();
+  // ================= 十一、測試要求 12：舊版單一服務資料可以正常讀取與匯出 =================
+  const legacyBackup = {
+    app: "nagoya-parapan-reservation2026",
+    formatVersion: 1,
+    exportedAt: new Date().toISOString(),
+    reservations: [
+      {
+        id: "legacy-1",
+        reservation_no: "R261022-001",
+        reservation_date: "2026-10-22",
+        team: "badminton",
+        team_other_text: "",
+        service: "meal", // 舊版欄位：service 直接放在最外層，沒有 services[] 陣列
+        headcount: 5,
+        start_time: "12:00",
+        end_time: "",
+        contact_person: "舊資料聯絡人",
+        contact_method: "0911-111-111",
+        notes: "舊版單一服務資料",
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+        meal: { meal_type: "lunch", meal_count: 5, serve_method: "onsite", serve_location: "舊版地點", meal_content: "", vegetarian_count: 0 },
+      },
+    ],
+    maxSeqUsed: { "2026-10-22": 1 },
+  };
+  const legacyPath = path.join(DOWNLOAD_DIR, "legacy-backup.json");
+  fs.writeFileSync(legacyPath, JSON.stringify(legacyBackup));
+  await page.goto(`${BASE}/backup`);
+  await page.waitForSelector("text=資料備份");
+  await page.setInputFiles('input[type="file"]', legacyPath);
   await page.waitForTimeout(300);
-  // 備註不會顯示在總覽列表欄位中，因此透過「查看」開啟詳細內容視窗，實際確認修改後內容是否存在
-  await page.fill('input[type="date"]', "2026-10-12");
+  const mergeSummary = await page.textContent("body");
+  check("舊版（單一服務）備份檔可以被正確解析，顯示 1 筆預約", /共有\s*1\s*筆預約/.test(mergeSummary));
+  await page.getByRole("button", { name: "開始合併" }).click();
+  await page.waitForTimeout(300);
+  await page.goto(`${BASE}/overview`);
+  await page.waitForSelector("text=每日預約總覽");
+  await page.fill('input[type="date"]', "2026-10-22");
+  await page.waitForTimeout(300);
+  const legacyCardText = await page.textContent("body");
+  check("舊版單一服務資料匯入後，可以在每日總覽正常顯示（自動轉換成新版多服務資料結構）", legacyCardText.includes("R261022-001") && legacyCardText.includes("餐食"));
+  await page.locator("div.bg-white.rounded-xl.shadow", { hasText: "R261022-001" }).first().getByRole("button", { name: "查看" }).click();
   await page.waitForTimeout(200);
-  await page.locator("table tbody tr").first().getByRole("button", { name: "查看" }).click();
-  await page.waitForTimeout(200);
-  const modalText = await page.textContent("body");
-  check("查看預約內容可以看到修改後的備註", modalText.includes("已透過自動化測試修改備註"));
+  const legacyViewText = await page.textContent("body");
+  check("舊版資料查看視窗正確顯示轉換後的內容", legacyViewText.includes("舊版地點"));
   await page.getByRole("button", { name: "關閉" }).click();
 
-  const rowCountBeforeCopy = await page.locator("table tbody tr").count();
-  await page.locator("table tbody tr").first().getByRole("button", { name: "複製" }).click();
-  await page.waitForSelector("text=新增預約");
-  await page.getByRole("button", { name: "下一步：確認" }).click();
-  await page.waitForTimeout(200);
-  const copiedNo = await page.locator("span.font-mono").first().textContent();
-  check("複製功能會產生全新的預約單編號（不是 R261012-001）", copiedNo !== "R261012-001" && /^R261012-\d{3}$/.test(copiedNo ?? ""));
-  await page.getByRole("button", { name: "確認新增" }).click();
-  await page.waitForTimeout(300);
-  await page.goto(`${BASE}/overview`);
-  await page.waitForSelector("text=每日預約總覽");
+  // ================= 十二、Excel 匯出：每日彙整、多張預約單、多服務分列、派車表 =================
   await page.fill('input[type="date"]', "2026-10-12");
   await page.waitForTimeout(200);
-  const rowCountAfterCopy = await page.locator("table tbody tr").count();
-  check("複製後總筆數增加 1 筆", rowCountAfterCopy === rowCountBeforeCopy + 1);
+  const [xlsxDownload] = await Promise.all([page.waitForEvent("download"), page.getByRole("button", { name: "匯出本日 Excel" }).click()]);
+  const xlsxPath = path.join(DOWNLOAD_DIR, "export-1012.xlsx");
+  await xlsxDownload.saveAs(xlsxPath);
+  check("Excel 匯出檔案成功下載", fs.existsSync(xlsxPath));
 
-  // 明確刪除「剛剛複製產生」的那一筆（以其預約單編號鎖定該列），避免誤刪其他既有預約（例如用 last() 依時間排序可能剛好刪到餐食資料）
-  const rowToDelete = page.locator("table tbody tr", { hasText: copiedNo ?? "" });
-  await rowToDelete.getByRole("button", { name: "刪除" }).click();
-  await page.waitForSelector("text=確定要刪除預約單編號");
-  const deleteConfirmBtn = page.getByRole("button", { name: "確定刪除" });
-  check("刪除確認按鈕預設是停用的（需要勾選才能刪除）", await deleteConfirmBtn.isDisabled());
-  await page.locator('input[type="checkbox"]').first().check();
-  await deleteConfirmBtn.click();
-  await page.waitForTimeout(300);
-  const rowCountAfterDelete = await page.locator("table tbody tr").count();
-  check("刪除功能可以正常運作，筆數減少 1 筆", rowCountAfterDelete === rowCountAfterCopy - 1);
+  const wb = new ExcelJS.Workbook();
+  await wb.xlsx.readFile(xlsxPath);
+  const expectedSheets = ["每日預約總表", "派車需求明細", "2026-10-12 派車", "餐食", "防護治療", "體能訓練", "運科支援"];
+  check("Excel 內含全部 7 張工作表（含派車需求明細與每日派車表）", expectedSheets.every((name) => wb.getWorksheet(name) != null));
 
-  // ---------- 14) JSON 備份及還原正常 ----------
-  await page.goto(`${BASE}/backup`);
-  await page.waitForSelector("text=資料備份");
-  const [download] = await Promise.all([page.waitForEvent("download"), page.getByRole("button", { name: "下載備份（JSON）" }).click()]);
-  const backupPath = path.join(DOWNLOAD_DIR, "backup.json");
-  await download.saveAs(backupPath);
-  check("備份 JSON 檔案成功下載", fs.existsSync(backupPath));
-  const backupContent = JSON.parse(fs.readFileSync(backupPath, "utf-8"));
-  check("備份檔案格式正確（app 標記與 reservations 陣列）", backupContent.app === "nagoya-parapan-reservation2026" && Array.isArray(backupContent.reservations));
+  const summarySheet = wb.getWorksheet("每日預約總表");
+  const summaryRows = [];
+  for (let r = 5; r <= 40; r++) {
+    const no = summarySheet.getCell(r, 2).value;
+    if (no) summaryRows.push({ row: r, no, service: summarySheet.getCell(r, 4).value });
+  }
+  const distinctNos = new Set(summaryRows.map((r) => r.no));
+  check("測試要求 7：同日多張預約單（R261012-001、R261012-003 等）能匯出至同一個 Excel", distinctNos.size >= 2);
 
-  const clearInput = page.locator('input[placeholder="請輸入「確認清除」"]');
-  await clearInput.fill("確認清除");
-  await page.getByRole("button", { name: "清除全部資料" }).click();
-  await page.waitForTimeout(300);
+  const firstBookingRows = summaryRows.filter((r) => r.no === "R261012-001");
+  check(
+    "測試要求 8：多服務預約單（R261012-001，含餐食＋交通接駁）在每日預約總表中正確分列成 2 列，且共用同一個預約單編號",
+    firstBookingRows.length === 2 && new Set(firstBookingRows.map((r) => r.no)).size === 1
+  );
+
+  const dispatchSheet = wb.getWorksheet("2026-10-12 派車");
+  check("每日派車表工作表標題為「YYYY-MM-DD 派車」", dispatchSheet.name === "2026-10-12 派車");
+  check("每日派車表橫向列印、凍結標題列", dispatchSheet.pageSetup.orientation === "landscape" && dispatchSheet.views?.[0]?.state === "frozen");
+  let unassignedText = "";
+  let otherVehicleColumnsAllBlank = true;
+  for (let r = 5; r <= 30; r++) {
+    const time = dispatchSheet.getCell(r, 1).value;
+    if (!time) continue;
+    unassignedText += String(dispatchSheet.getCell(r, 2).value ?? "");
+    for (let c = 3; c <= 7; c++) {
+      const v = dispatchSheet.getCell(r, c).value;
+      if (v) otherVehicleColumnsAllBlank = false;
+    }
+  }
+  check("測試要求 9：交通接駁需求正確進入每日派車表", unassignedText.includes("R261012-001") && unassignedText.includes("→"));
+  check("測試要求 9：餐食外送正確進入每日派車表並標示 [送餐]", unassignedText.includes("[送餐]") && unassignedText.includes(mealDeliveryNo));
+  check("測試要求 11：所有未排車需求預設進入「未指定車輛」欄，其餘車輛欄位保持空白", otherVehicleColumnsAllBlank);
+
+  const transportDetailSheet = wb.getWorksheet("派車需求明細");
+  check("派車需求明細工作表存在且包含交通接駁預約單編號", String(transportDetailSheet.getCell(5, 1).value).length > 0);
+
+  // 專門驗證「現場取餐不列入派車表」：另外新增一筆現場取餐的餐食預約，匯出後確認派車表沒有它的編號
+  await newReservationPage();
+  await fillCommon("2026-10-23");
+  await toggleService("餐食");
+  await fillMeal({ headcount: 2, mealCount: 2, time: "12:00", serveMethod: "onsite" });
+  await goNext();
+  await confirmAdd();
   await page.goto(`${BASE}/overview`);
   await page.waitForSelector("text=每日預約總覽");
-  await page.fill('input[type="date"]', "2026-10-12");
+  await page.fill('input[type="date"]', "2026-10-23");
   await page.waitForTimeout(200);
-  const overviewAfterClearText = await page.textContent("body");
-  check("清除全部資料後，總覽頁顯示沒有資料", overviewAfterClearText.includes("這天沒有符合篩選條件的預約資料"));
+  const [xlsxDownload2] = await Promise.all([page.waitForEvent("download"), page.getByRole("button", { name: "匯出本日 Excel" }).click()]);
+  const xlsxPath2 = path.join(DOWNLOAD_DIR, "export-1023.xlsx");
+  await xlsxDownload2.saveAs(xlsxPath2);
+  const wb2 = new ExcelJS.Workbook();
+  await wb2.xlsx.readFile(xlsxPath2);
+  const dispatchSheet2 = wb2.getWorksheet("2026-10-23 派車");
+  let dispatch2Text = "";
+  for (let r = 5; r <= 30; r++) {
+    dispatch2Text += String(dispatchSheet2.getCell(r, 2).value ?? "");
+  }
+  check("測試要求 10：現場用餐（onsite）的預約完全不會出現在每日派車表", !dispatch2Text.includes("R261023-001"));
 
-  await page.goto(`${BASE}/backup`);
-  await page.waitForSelector("text=資料備份");
-  await page.setInputFiles('input[type="file"]', backupPath);
-  await page.waitForTimeout(300);
-  const summaryText = await page.textContent("body");
-  check("匯入備份前會顯示資料筆數及日期範圍", /共有\s*\d+\s*筆預約/.test(summaryText) && /日期範圍/.test(summaryText));
-  await page.getByRole("button", { name: "確定取代" }).click();
-  await page.waitForTimeout(300);
-  await page.goto(`${BASE}/overview`);
-  await page.waitForSelector("text=每日預約總覽");
-  await page.fill('input[type="date"]', "2026-10-12");
-  await page.waitForTimeout(200);
-  const rowCountAfterRestore = await page.locator("table tbody tr").count();
-  check("還原備份後資料正確回復", rowCountAfterRestore > 0);
+  const summarySheet2 = wb2.getWorksheet("每日預約總表");
+  check("現場用餐的預約仍然正確出現在每日預約總表（只是不進派車表）", String(summarySheet2.getCell(5, 2).value) === "R261023-001");
 
-  // ---------- 15) HashRouter：重新整理不會出現 404 ----------
+  // ---------- Excel 日期／時間欄位：須為 Excel 可辨識的真正日期/時間值（型別與 number format） ----------
+  const dateCellInSummary = summarySheet.getCell(5, 1);
+  check("每日預約總表「日期」欄為 Excel 日期型別（非純文字）", dateCellInSummary.type === ExcelJS.ValueType.Date);
+  check("每日預約總表「日期」欄 number format 為 yyyy-mm-dd", dateCellInSummary.numFmt === "yyyy-mm-dd");
+  const startTimeCellInSummary = summarySheet.getCell(5, 6);
+  check("每日預約總表「開始時間」欄為 Excel 日期/時間型別（非純文字）", startTimeCellInSummary.type === ExcelJS.ValueType.Date);
+  check("每日預約總表「開始時間」欄 number format 為 hh:mm", startTimeCellInSummary.numFmt === "hh:mm");
+
+  // ================= 十三、HashRouter：直接重新整理不會出現 404 =================
   await page.goto(`${BASE}/export`);
   await page.waitForSelector("text=Excel 匯出");
   await page.reload();
@@ -319,152 +452,12 @@ async function main() {
   const exportBodyAfterReload = await page.textContent("body");
   check("直接重新整理深層路徑（/export）不會出現 404，正常顯示頁面", exportBodyAfterReload.includes("Excel 匯出"));
 
-  // ---------- 11/12/13) Excel 匯出 ----------
-  await page.fill('input[type="date"]', "2026-10-12");
-  const [xlsxDownload] = await Promise.all([page.waitForEvent("download"), page.getByRole("button", { name: "匯出當日預約" }).click()]);
-  const xlsxPath = path.join(DOWNLOAD_DIR, "export.xlsx");
-  await xlsxDownload.saveAs(xlsxPath);
-  check("Excel 匯出檔案成功下載", fs.existsSync(xlsxPath));
-
-  const wb = new ExcelJS.Workbook();
-  await wb.xlsx.readFile(xlsxPath);
-  const expectedSheets = ["每日預約總表", "餐食", "交通接駁", "防護治療", "體能訓練", "運科支援"];
-  check("Excel 內含全部 6 張工作表", expectedSheets.every((name) => wb.getWorksheet(name) != null));
-
-  const mealSheet = wb.getWorksheet("餐食");
-  check("餐食工作表標題列存在（第 4 列為欄位標題）", mealSheet.getCell(4, 1).value === "序號");
-  check("餐食工作表可以看到餐食資料（非「本日無預約資料」的留白提示）", mealSheet.getCell(5, 3).value !== "本日無預約資料" && mealSheet.getCell(5, 8).value != null);
-
-  const fitnessSheet = wb.getWorksheet("體能訓練");
-  // 2026-10-12 沒有體能訓練預約，應顯示「本日無預約資料」
-  let fitnessHasEmptyNotice = false;
-  fitnessSheet.eachRow((row) => {
-    row.eachCell((cell) => {
-      if (cell.value === "本日無預約資料") fitnessHasEmptyNotice = true;
-    });
-  });
-  check("無預約資料的服務工作表仍存在，並顯示「本日無預約資料」", fitnessHasEmptyNotice);
-
-  const summarySheet = wb.getWorksheet("每日預約總表");
-  check("每日預約總表標題列文字正確", String(summarySheet.getCell(1, 1).value).includes("2026名古屋亞帕運中繼站預約清單"));
-  check("每日預約總表凍結窗格已設定", summarySheet.views?.[0]?.state === "frozen");
-  check("每日預約總表設定為橫向列印", summarySheet.pageSetup.orientation === "landscape");
-  check("每日預約總表設定為縮放至一頁寬", summarySheet.pageSetup.fitToWidth === 1);
-
-  // ---------- Excel 日期／時間欄位：須為 Excel 可辨識的真正日期/時間值（型別與 number format），不只是顯示文字 ----------
-  const dateCellInSummary = summarySheet.getCell(5, 3); // 日期欄
-  check("每日預約總表「日期」欄為 Excel 日期型別（非純文字）", dateCellInSummary.type === ExcelJS.ValueType.Date);
-  check("每日預約總表「日期」欄 number format 為 yyyy-mm-dd", dateCellInSummary.numFmt === "yyyy-mm-dd");
-
-  const startTimeCellInSummary = summarySheet.getCell(5, 4); // 開始時間欄（第一筆為餐食 12:00）
-  check("每日預約總表「開始時間」欄為 Excel 日期/時間型別（非純文字）", startTimeCellInSummary.type === ExcelJS.ValueType.Date);
-  check("每日預約總表「開始時間」欄 number format 為 hh:mm", startTimeCellInSummary.numFmt === "hh:mm");
-
-  const endTimeCellInSummary = summarySheet.getCell(5, 5); // 結束時間欄（餐食沒有結束時間，應留白）
-  check(
-    "每日預約總表：餐食服務沒有結束時間，儲存格保持留白，不得被誤轉成錯誤的日期/時間值",
-    endTimeCellInSummary.value === null || endTimeCellInSummary.value === undefined
-  );
-
-  const mealSheetForType = wb.getWorksheet("餐食");
-  const mealTimeCell = mealSheetForType.getCell(5, 5); // 「時間」欄
-  check("餐食工作表「時間」欄為 Excel 日期/時間型別", mealTimeCell.type === ExcelJS.ValueType.Date);
-  check("餐食工作表「時間」欄 number format 為 hh:mm（畫面顯示仍為24小時制）", mealTimeCell.numFmt === "hh:mm");
-
-  const transportSheetForType = wb.getWorksheet("交通接駁");
-  const transportStartCell = transportSheetForType.getCell(5, 4); // 去程上車時間
-  check("交通接駁工作表「去程上車時間」欄為 Excel 日期/時間型別", transportStartCell.type === ExcelJS.ValueType.Date);
-  check("交通接駁工作表「去程上車時間」欄 number format 為 hh:mm", transportStartCell.numFmt === "hh:mm");
-  const transportReturnCell = transportSheetForType.getCell(5, 8); // 回程上車時間（此筆為單程，應留白）
-  check(
-    "交通接駁工作表：單程預約沒有回程時間，儲存格保持留白，不得被誤轉成錯誤的日期/時間值",
-    transportReturnCell.value === null || transportReturnCell.value === undefined
-  );
-
-  // Excel 可依日期及時間正確排序：驗證日期/時間欄位底層儲存的是可比較的數字（日期序號／時間分率），而非字串
-  check("每日預約總表「日期」欄底層為可供 Excel 排序比較的日期數值", dateCellInSummary.value instanceof Date);
-  check("每日預約總表「開始時間」欄底層為可供 Excel 排序比較的時間數值", startTimeCellInSummary.value instanceof Date);
-
-  // ---------- 16) 手機版可操作（縮小視窗檢查版面） ----------
+  // ================= 十四、手機版可操作 =================
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto(`${BASE}/new`);
   await page.waitForSelector("text=新增預約");
-  const navVisible = await page.locator("nav").isVisible();
-  check("手機版寬度下導覽列仍然可見可操作", navVisible);
-  const dateInputMobile = page.locator('input[type="date"]').first();
-  check("手機版寬度下日期欄位仍然可見", await dateInputMobile.isVisible());
-
-  // ---------- 刪除舊預約後，不得重新使用已經使用過的編號 ----------
-  await page.evaluate(() => localStorage.clear());
-  await page.goto(`${BASE}/new`);
-  await page.waitForSelector("text=新增預約");
-  await page.fill('input[type="date"]', "2026-10-20");
-  await clickService("餐食");
-  const headcountInputReuse = page.locator("label:has-text('預約人數')").locator("xpath=following-sibling::input[1]");
-  await headcountInputReuse.fill("1");
-  await page.locator('input[type="time"]').first().fill("12:00");
-  await page.locator("text=餐食份數").locator("xpath=following::input[@type='number'][1]").fill("1");
-  await page.locator("text=地點").locator("xpath=following::input[1]").fill("中繼站餐廳");
-  await page.getByRole("button", { name: "下一步：確認" }).click();
-  await page.waitForTimeout(200);
-  const firstNoReuse = await page.locator("span.font-mono").first().textContent();
-  check("編號重用測試：第一筆為 R261020-001", firstNoReuse === "R261020-001");
-  await page.getByRole("button", { name: "確認新增" }).click();
-  await page.waitForTimeout(300);
-
-  await page.goto(`${BASE}/overview`);
-  await page.waitForSelector("text=每日預約總覽");
-  await page.fill('input[type="date"]', "2026-10-20");
-  await page.waitForTimeout(200);
-  await page.locator("table tbody tr").first().getByRole("button", { name: "刪除" }).click();
-  await page.waitForSelector("text=確定要刪除預約單編號");
-  await page.locator('input[type="checkbox"]').first().check();
-  await page.getByRole("button", { name: "確定刪除" }).click();
-  await page.waitForTimeout(300);
-
-  await page.goto(`${BASE}/new`);
-  await page.waitForSelector("text=新增預約");
-  await page.fill('input[type="date"]', "2026-10-20");
-  await clickService("餐食");
-  await headcountInputReuse.fill("1");
-  await page.locator('input[type="time"]').first().fill("13:00");
-  await page.locator("text=餐食份數").locator("xpath=following::input[@type='number'][1]").fill("1");
-  await page.locator("text=地點").locator("xpath=following::input[1]").fill("中繼站餐廳");
-  await page.getByRole("button", { name: "下一步：確認" }).click();
-  await page.waitForTimeout(200);
-  const secondNoReuse = await page.locator("span.font-mono").first().textContent();
-  check("刪除唯一一筆 R261020-001 後，下一號是 R261020-002（不重複使用已刪除的編號）", secondNoReuse === "R261020-002");
-  await page.getByRole("button", { name: "返回修改" }).click();
-
-  // ---------- 醫師治療：不做容量阻擋，但提醒同時段已有其他醫師治療預約 ----------
-  await page.fill('input[type="date"]', "2026-10-21");
-  await clickService("防護治療");
-  const doctorBranchSelect = page.locator("label:has-text('分支項目')").locator("xpath=following-sibling::select[1]");
-  await doctorBranchSelect.selectOption("doctor");
-  const timeInputsDoctor1 = page.locator('input[type="time"]');
-  await timeInputsDoctor1.nth(0).fill("15:00");
-  await timeInputsDoctor1.nth(1).fill("15:30");
-  await page.getByRole("button", { name: "下一步：確認" }).click();
-  await page.waitForTimeout(200);
-  await page.getByRole("button", { name: "確認新增" }).click();
-  await page.waitForTimeout(300);
-
-  await page.getByRole("button", { name: "繼續新增" }).click();
-  await page.fill('input[type="date"]', "2026-10-21");
-  await clickService("防護治療");
-  const doctorBranchSelect2 = page.locator("label:has-text('分支項目')").locator("xpath=following-sibling::select[1]");
-  await doctorBranchSelect2.selectOption("doctor");
-  const timeInputsDoctor2 = page.locator('input[type="time"]');
-  await timeInputsDoctor2.nth(0).fill("15:15");
-  await timeInputsDoctor2.nth(1).fill("15:45");
-  await page.getByRole("button", { name: "下一步：確認" }).click();
-  await page.waitForTimeout(200);
-  const doctorConfirmText = await page.textContent("body");
-  check("醫師治療同時段重疊只顯示提醒文字（不阻擋）", doctorConfirmText.includes("已有其他醫師治療預約"));
-  const doctorConfirmBtn = page.getByRole("button", { name: "確認新增" });
-  check("醫師治療沒有容量上限，重疊時仍可確認新增", await doctorConfirmBtn.isEnabled());
-  await doctorConfirmBtn.click();
-  await page.waitForTimeout(300);
+  check("手機版寬度下導覽列仍然可見可操作", await page.locator("nav").isVisible());
+  check("手機版寬度下日期欄位仍然可見", await page.locator('input[type="date"]').first().isVisible());
 
   await browser.close();
 

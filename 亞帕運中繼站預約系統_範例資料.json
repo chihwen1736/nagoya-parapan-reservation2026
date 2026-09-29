@@ -1,124 +1,164 @@
 {
   "app": "nagoya-parapan-reservation2026",
   "formatVersion": 1,
-  "exportedAt": "2026-09-25T07:54:10.609Z",
+  "exportedAt": "2026-09-29T05:07:15.511Z",
   "reservations": [
     {
-      "id": "238b78a9-92c2-46f0-b5a0-69795bfba0d0",
-      "reservation_no": "R261012-001",
+      "id": "09bbbb17-b9c1-4265-9dac-7f56dd1d9cf8",
       "reservation_date": "2026-10-12",
       "team": "athletics",
       "team_other_text": "",
-      "service": "meal",
-      "headcount": 4,
-      "start_time": "12:00",
-      "end_time": "",
       "contact_person": "王小明",
       "contact_method": "0900-000-001",
       "notes": "",
-      "created_at": "2026-09-25T07:54:10.609Z",
-      "updated_at": "2026-09-25T07:54:10.609Z",
-      "meal": {
-        "meal_type": "lunch",
-        "meal_count": 4,
-        "serve_method": "onsite",
-        "serve_location": "中繼站餐廳",
-        "meal_content": "",
-        "vegetarian_count": 1
-      }
+      "created_at": "2026-09-29T05:07:15.511Z",
+      "updated_at": "2026-09-29T05:07:15.511Z",
+      "reservation_no": "R261012-001",
+      "services": [
+        {
+          "entry_id": "7981b2fc-4fa6-472c-b9c4-c6e59c1001bf",
+          "headcount": 4,
+          "start_time": "12:00",
+          "end_time": "",
+          "service": "meal",
+          "meal": {
+            "meal_type": "lunch",
+            "meal_count": 4,
+            "serve_method": "onsite",
+            "serve_location": "中繼站餐廳",
+            "meal_content": "",
+            "vegetarian_count": 1
+          }
+        }
+      ]
     },
     {
-      "id": "f857ac65-d2be-4394-8699-162544e20672",
-      "reservation_no": "R261012-002",
+      "id": "4392a6b3-8ea4-44cd-8560-c550771be3d0",
       "reservation_date": "2026-10-12",
       "team": "swimming",
       "team_other_text": "",
-      "service": "transport",
-      "headcount": 6,
-      "start_time": "08:30",
-      "end_time": "",
       "contact_person": "王小明",
       "contact_method": "0900-000-001",
       "notes": "",
-      "created_at": "2026-09-25T07:54:10.609Z",
-      "updated_at": "2026-09-25T07:54:10.609Z",
-      "transport": {
-        "transport_type": "round_trip",
-        "outbound_pickup": "village_hotel",
-        "outbound_pickup_other": "",
-        "outbound_dropoff": "venue",
-        "outbound_dropoff_other": "",
-        "passenger_count": 6,
-        "needs_accessible_vehicle": false,
-        "wheelchair_count": 0,
-        "passenger_note": "游泳隊上午場次",
-        "return_time": "13:00",
-        "return_pickup": "venue",
-        "return_pickup_other": "",
-        "return_dropoff": "village_hotel",
-        "return_dropoff_other": "",
-        "return_count": 6
-      }
+      "created_at": "2026-09-29T05:07:15.511Z",
+      "updated_at": "2026-09-29T05:07:15.511Z",
+      "reservation_no": "R261012-002",
+      "services": [
+        {
+          "entry_id": "4f17a99b-54f6-4e60-bf92-de99640760cb",
+          "headcount": 6,
+          "start_time": "08:30",
+          "end_time": "",
+          "service": "transport",
+          "transport": {
+            "transport_type": "round_trip",
+            "outbound_pickup": "village_hotel",
+            "outbound_pickup_other": "",
+            "outbound_dropoff": "venue",
+            "outbound_dropoff_other": "",
+            "passenger_count": 6,
+            "needs_accessible_vehicle": false,
+            "wheelchair_count": 0,
+            "passenger_note": "游泳隊上午場次",
+            "return_time": "13:00",
+            "return_pickup": "venue",
+            "return_pickup_other": "",
+            "return_dropoff": "village_hotel",
+            "return_dropoff_other": "",
+            "return_count": 6
+          }
+        },
+        {
+          "entry_id": "e36952d4-ea07-48e0-9abf-5c7fa7daf9ac",
+          "headcount": 2,
+          "start_time": "09:00",
+          "end_time": "10:00",
+          "service": "therapy",
+          "therapy": {
+            "therapy_branch": "protective_treatment",
+            "requirement_note": "賽前熱身防護"
+          }
+        }
+      ]
     },
     {
-      "id": "cd36442b-e95f-4424-83e0-2efcf52dc66e",
-      "reservation_no": "R261012-003",
+      "id": "2639c590-ab93-403b-a308-7cd187b578c3",
       "reservation_date": "2026-10-12",
       "team": "judo",
       "team_other_text": "",
-      "service": "therapy",
-      "headcount": 2,
-      "start_time": "09:00",
-      "end_time": "10:00",
       "contact_person": "王小明",
       "contact_method": "0900-000-001",
       "notes": "",
-      "created_at": "2026-09-25T07:54:10.609Z",
-      "updated_at": "2026-09-25T07:54:10.609Z",
-      "therapy": {
-        "therapy_branch": "protective_treatment",
-        "requirement_note": "賽前熱身防護"
-      }
+      "created_at": "2026-09-29T05:07:15.511Z",
+      "updated_at": "2026-09-29T05:07:15.511Z",
+      "reservation_no": "R261012-003",
+      "services": [
+        {
+          "entry_id": "cb14edf9-f5db-4a53-9b5a-ef371c64afbc",
+          "headcount": 3,
+          "start_time": "12:30",
+          "end_time": "",
+          "service": "meal",
+          "meal": {
+            "meal_type": "lunch",
+            "meal_count": 3,
+            "serve_method": "delivery",
+            "serve_location": "柔道比賽場館休息室",
+            "meal_content": "便當×3",
+            "vegetarian_count": 0
+          }
+        }
+      ]
     },
     {
-      "id": "a60fa6a3-75a7-46ef-80a5-a5a3176d4497",
-      "reservation_no": "R261012-004",
+      "id": "0c918b83-ff3d-467d-bf31-e2824c0d0c9f",
       "reservation_date": "2026-10-12",
       "team": "powerlifting",
       "team_other_text": "",
-      "service": "fitness",
-      "headcount": 3,
-      "start_time": "09:30",
-      "end_time": "10:30",
       "contact_person": "王小明",
       "contact_method": "0900-000-001",
       "notes": "",
-      "created_at": "2026-09-25T07:54:10.609Z",
-      "updated_at": "2026-09-25T07:54:10.609Z",
-      "fitness": {
-        "fitness_branch": "strength_training",
-        "training_requirement": "下肢肌力訓練"
-      }
+      "created_at": "2026-09-29T05:07:15.511Z",
+      "updated_at": "2026-09-29T05:07:15.511Z",
+      "reservation_no": "R261012-004",
+      "services": [
+        {
+          "entry_id": "04bc017d-ad0c-408e-9610-11b568308ddb",
+          "headcount": 3,
+          "start_time": "09:30",
+          "end_time": "10:30",
+          "service": "fitness",
+          "fitness": {
+            "fitness_branch": "strength_training",
+            "training_requirement": "下肢肌力訓練"
+          }
+        }
+      ]
     },
     {
-      "id": "e7f5f9b8-012a-4a8c-a9a6-7e939193fc9d",
-      "reservation_no": "R261012-005",
+      "id": "043cf6a8-fa35-42b1-8718-0807776ec811",
       "reservation_date": "2026-10-12",
       "team": "wheelchair_fencing",
       "team_other_text": "",
-      "service": "sports_science",
-      "headcount": 1,
-      "start_time": "11:00",
-      "end_time": "11:30",
       "contact_person": "王小明",
       "contact_method": "0900-000-001",
       "notes": "",
-      "created_at": "2026-09-25T07:54:10.609Z",
-      "updated_at": "2026-09-25T07:54:10.609Z",
-      "sportsScience": {
-        "sports_science_branch": "individual_consult",
-        "requirement_note": "賽前心理諮詢"
-      }
+      "created_at": "2026-09-29T05:07:15.511Z",
+      "updated_at": "2026-09-29T05:07:15.511Z",
+      "reservation_no": "R261012-005",
+      "services": [
+        {
+          "entry_id": "c6c08bc2-097c-4528-bd60-82e7dbc61400",
+          "headcount": 1,
+          "start_time": "11:00",
+          "end_time": "11:30",
+          "service": "sports_science",
+          "sportsScience": {
+            "sports_science_branch": "individual_consult",
+            "requirement_note": "賽前心理諮詢"
+          }
+        }
+      ]
     }
   ],
   "maxSeqUsed": {

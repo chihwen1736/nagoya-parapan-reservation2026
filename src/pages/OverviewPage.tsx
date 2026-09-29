@@ -3,6 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { useData } from "@/context/DataContext";
 import { ReservationSummary } from "@/components/ReservationSummary";
 import { todayInEventRangeOrStart } from "@/lib/time";
+import { buildDailyExportWorkbook, workbookToBlob } from "@/excel/exportWorkbook";
 import {
   EVENT_END_DATE,
   EVENT_START_DATE,
@@ -10,6 +11,7 @@ import {
   SERVICE_COLORS,
   SERVICE_LABELS,
   SERVICE_OPTIONS,
+  ServiceEntry,
   ServiceCode,
   TEAM_LABELS,
   TEAM_OPTIONS,
@@ -21,15 +23,31 @@ function teamDisplayName(r: Reservation): string {
 }
 
 /** 交通接駁顯示去程人數；來回且去程/回程人數不同時顯示「去程X人／回程Y人」，其餘服務顯示共用預約人數 */
-function headcountDisplay(r: Reservation): string {
-  if (r.service === "transport" && r.transport) {
-    const { passenger_count, return_count, transport_type } = r.transport;
+function headcountDisplay(entry: ServiceEntry): string {
+  if (entry.service === "transport" && entry.transport) {
+    const { passenger_count, return_count, transport_type } = entry.transport;
     if (transport_type === "round_trip" && return_count !== passenger_count) {
       return `去程${passenger_count}人／回程${return_count}人`;
     }
     return `${passenger_count}人`;
   }
-  return `${r.headcount}`;
+  return `${entry.headcount}人`;
+}
+
+function reservationEarliestStart(r: Reservation): string {
+  if (r.services.length === 0) return "";
+  return r.services.reduce((min, s) => (s.start_time < min ? s.start_time : min), r.services[0]!.start_time);
+}
+
+function triggerBlobDownload(blob: Blob, filename: string) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 export default function OverviewPage() {
@@ -43,6 +61,8 @@ export default function OverviewPage() {
   const [viewing, setViewing] = useState<Reservation | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<Reservation | null>(null);
   const [deleteConfirmChecked, setDeleteConfirmChecked] = useState(false);
+  const [exportBusy, setExportBusy] = useState(false);
+  const [exportMsg, setExportMsg] = useState("");
 
   const dayReservations = useMemo(() => reservations.filter((r) => r.reservation_date === date), [reservations, date]);
 
@@ -50,30 +70,33 @@ export default function OverviewPage() {
     const kw = keyword.trim().toLowerCase();
     return dayReservations
       .filter((r) => !teamFilter || r.team === teamFilter)
-      .filter((r) => !serviceFilter || r.service === serviceFilter)
+      .filter((r) => !serviceFilter || r.services.some((s) => s.service === serviceFilter))
       .filter((r) => {
         if (!kw) return true;
         const haystack = [r.reservation_no, teamDisplayName(r), r.contact_person, r.contact_method, r.notes].join(" ").toLowerCase();
         return haystack.includes(kw);
       })
-      .sort((a, b) => a.start_time.localeCompare(b.start_time));
+      .sort((a, b) => reservationEarliestStart(a).localeCompare(reservationEarliestStart(b)));
   }, [dayReservations, teamFilter, serviceFilter, keyword]);
 
   const stats = useMemo(() => {
-    const mealTotal = dayReservations.filter((r) => r.service === "meal").reduce((sum, r) => sum + (r.meal?.meal_count ?? 0), 0);
-    const transportTotal = dayReservations
-      .filter((r) => r.service === "transport")
-      .reduce((sum, r) => sum + (r.transport?.passenger_count ?? 0) + (r.transport?.return_count ?? 0), 0);
-    const therapyTotal = dayReservations.filter((r) => r.service === "therapy").reduce((sum, r) => sum + r.headcount, 0);
-    const fitnessTotal = dayReservations.filter((r) => r.service === "fitness").reduce((sum, r) => sum + r.headcount, 0);
-    const sportsScienceTotal = dayReservations.filter((r) => r.service === "sports_science").reduce((sum, r) => sum + r.headcount, 0);
+    const allEntries = dayReservations.flatMap((r) => r.services);
+    const mealTotal = allEntries.filter((s) => s.service === "meal").reduce((sum, s) => sum + (s.meal?.meal_count ?? 0), 0);
+    const transportTotal = allEntries
+      .filter((s) => s.service === "transport")
+      .reduce((sum, s) => sum + (s.transport?.passenger_count ?? 0) + (s.transport?.return_count ?? 0), 0);
+    const therapyTotal = allEntries.filter((s) => s.service === "therapy").reduce((sum, s) => sum + s.headcount, 0);
+    const fitnessTotal = allEntries.filter((s) => s.service === "fitness").reduce((sum, s) => sum + s.headcount, 0);
+    const sportsScienceTotal = allEntries.filter((s) => s.service === "sports_science").reduce((sum, s) => sum + s.headcount, 0);
     return { count: dayReservations.length, mealTotal, transportTotal, therapyTotal, fitnessTotal, sportsScienceTotal };
   }, [dayReservations]);
 
   function handleCopy(r: Reservation) {
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     const { id, reservation_no, created_at, updated_at, ...draft } = r;
-    setDraftReservation(draft);
+    // 複製的每個服務時段也要換成全新的 entry_id，避免與原本的服務時段共用同一個識別碼
+    const copiedServices = draft.services.map((s) => ({ ...s, entry_id: `${s.entry_id}-copy-${Math.random().toString(16).slice(2)}` }));
+    setDraftReservation({ ...draft, services: copiedServices });
     navigate("/new");
   }
 
@@ -86,6 +109,19 @@ export default function OverviewPage() {
     if (!deleteTarget || !deleteConfirmChecked) return;
     deleteReservation(deleteTarget.id);
     setDeleteTarget(null);
+  }
+
+  async function handleExportToday() {
+    setExportBusy(true);
+    setExportMsg("");
+    try {
+      const wb = await buildDailyExportWorkbook(date, reservations);
+      const blob = await workbookToBlob(wb);
+      triggerBlobDownload(blob, `${date}_亞帕運中繼站預約及派車表.xlsx`);
+      setExportMsg(`已匯出 ${date} 的預約及派車表（共 ${dayReservations.length} 張預約單）。`);
+    } finally {
+      setExportBusy(false);
+    }
   }
 
   return (
@@ -133,7 +169,7 @@ export default function OverviewPage() {
       </div>
 
       <div className="grid grid-cols-2 sm:grid-cols-6 gap-2 text-sm">
-        <StatCard label="全部預約筆數" value={stats.count} />
+        <StatCard label="全部預約單數" value={stats.count} />
         <StatCard label="餐食總份數" value={stats.mealTotal} />
         <StatCard label="交通接駁人次" value={stats.transportTotal} />
         <StatCard label="防護治療總人數" value={stats.therapyTotal} />
@@ -141,53 +177,49 @@ export default function OverviewPage() {
         <StatCard label="運科支援總人數" value={stats.sportsScienceTotal} />
       </div>
 
-      <div className="bg-white rounded-xl shadow overflow-x-auto">
-        <table className="w-full text-sm min-w-[900px]">
-          <thead className="bg-gray-50 text-gray-500">
-            <tr>
-              <th className="text-left px-3 py-2">預約單編號</th>
-              <th className="text-left px-3 py-2">時間</th>
-              <th className="text-left px-3 py-2">代表隊</th>
-              <th className="text-left px-3 py-2">服務項目</th>
-              <th className="text-left px-3 py-2">人數</th>
-              <th className="text-left px-3 py-2">聯絡人</th>
-              <th className="text-left px-3 py-2">操作</th>
-            </tr>
-          </thead>
-          <tbody>
-            {filtered.map((r) => (
-              <tr key={r.id} className={`border-t ${SERVICE_COLORS[r.service]}`}>
-                <td className="px-3 py-2 font-mono whitespace-nowrap">{r.reservation_no}</td>
-                <td className="px-3 py-2 whitespace-nowrap">{r.start_time}{r.end_time && r.end_time !== r.start_time ? `-${r.end_time}` : ""}</td>
-                <td className="px-3 py-2 whitespace-nowrap">{teamDisplayName(r)}</td>
-                <td className="px-3 py-2 whitespace-nowrap">{SERVICE_LABELS[r.service]}</td>
-                <td className="px-3 py-2 whitespace-nowrap">{headcountDisplay(r)}</td>
-                <td className="px-3 py-2 whitespace-nowrap">{r.contact_person}</td>
-                <td className="px-3 py-2 whitespace-nowrap space-x-2">
-                  <button onClick={() => setViewing(r)} className="text-brand-600 text-xs underline">
-                    查看
-                  </button>
-                  <button onClick={() => navigate(`/edit/${r.id}`)} className="text-brand-600 text-xs underline">
-                    修改
-                  </button>
-                  <button onClick={() => handleCopy(r)} className="text-gray-600 text-xs underline">
-                    複製
-                  </button>
-                  <button onClick={() => openDeleteConfirm(r)} className="text-red-600 text-xs underline">
-                    刪除
-                  </button>
-                </td>
-              </tr>
-            ))}
-            {filtered.length === 0 && (
-              <tr>
-                <td colSpan={7} className="px-3 py-6 text-center text-gray-400">
-                  這天沒有符合篩選條件的預約資料
-                </td>
-              </tr>
-            )}
-          </tbody>
-        </table>
+      <div className="bg-white rounded-xl shadow p-4 flex flex-wrap items-center gap-3">
+        <button onClick={handleExportToday} disabled={exportBusy} className="bg-brand-600 text-white rounded-lg px-4 py-2 text-sm disabled:opacity-50">
+          {exportBusy ? "匯出中…" : "匯出本日 Excel"}
+        </button>
+        <span className="text-xs text-gray-400">會把 {date} 當天全部預約單彙整在同一個 Excel 檔案（含每日派車表）</span>
+        {exportMsg && <span className="text-sm text-green-700">{exportMsg}</span>}
+      </div>
+
+      <div className="space-y-3">
+        {filtered.map((r) => (
+          <div key={r.id} className="bg-white rounded-xl shadow p-4">
+            <div className="flex flex-wrap items-start justify-between gap-2">
+              <div>
+                <span className="font-mono font-semibold text-brand-700">{r.reservation_no}</span>
+                <span className="ml-2 text-sm text-gray-600">{teamDisplayName(r)}</span>
+                <span className="ml-2 text-xs text-gray-400">聯絡人：{r.contact_person || "—"}</span>
+              </div>
+              <div className="space-x-2">
+                <button onClick={() => setViewing(r)} className="text-brand-600 text-xs underline">
+                  查看
+                </button>
+                <button onClick={() => navigate(`/edit/${r.id}`)} className="text-brand-600 text-xs underline">
+                  修改
+                </button>
+                <button onClick={() => handleCopy(r)} className="text-gray-600 text-xs underline">
+                  複製
+                </button>
+                <button onClick={() => openDeleteConfirm(r)} className="text-red-600 text-xs underline">
+                  刪除
+                </button>
+              </div>
+            </div>
+            <div className="mt-2 flex flex-wrap gap-2">
+              {r.services.map((s) => (
+                <span key={s.entry_id} className={`text-xs rounded-lg px-2 py-1 ${SERVICE_COLORS[s.service]}`}>
+                  {SERVICE_LABELS[s.service]}｜{s.start_time}
+                  {s.end_time && s.end_time !== s.start_time ? `-${s.end_time}` : ""}｜{headcountDisplay(s)}
+                </span>
+              ))}
+            </div>
+          </div>
+        ))}
+        {filtered.length === 0 && <div className="bg-white rounded-xl shadow p-6 text-center text-gray-400">這天沒有符合篩選條件的預約資料</div>}
       </div>
 
       {viewing && (
@@ -205,7 +237,8 @@ export default function OverviewPage() {
         <Modal onClose={() => setDeleteTarget(null)} title="刪除預約">
           <p className="text-sm text-gray-700">
             確定要刪除預約單編號 <span className="font-mono font-semibold">{deleteTarget.reservation_no}</span>（
-            {teamDisplayName(deleteTarget)}／{SERVICE_LABELS[deleteTarget.service]}）嗎？此動作無法復原，且這個編號往後不會再被使用。
+            {teamDisplayName(deleteTarget)}，包含 {deleteTarget.services.map((s) => SERVICE_LABELS[s.service]).join("、")}）嗎？
+            此動作無法復原，且這個編號往後不會再被使用。
           </p>
           <label className="flex items-center gap-2 text-sm mt-3">
             <input type="checkbox" checked={deleteConfirmChecked} onChange={(e) => setDeleteConfirmChecked(e.target.checked)} />
